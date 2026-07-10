@@ -16,7 +16,7 @@ dependencies = [
     # reason: later numpy version such as 2.4 will trigger
     # "TypeError: only 0-dimensional arrays can be converted to Python scalars"
     # in yourdf/urdf.py::1078 when converting float(q)
-    "numpy==2.3.5",
+    "numpy>=1.26,<2",  # hcrl: co-installed with isaaclab (numpy<2); upstream pinned ==2.3.5
     "torch",
     "tqdm",
     "scipy",
@@ -28,7 +28,7 @@ dependencies = [
     "viser",
     "robot_descriptions",
     "yourdfpy",
-    "cvxpy",
+    "cvxpy<1.6",  # hcrl: cvxpy>=1.6 wheels require numpy>=2
     "libigl",
     "tyro",
 ]
