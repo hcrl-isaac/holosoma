@@ -613,7 +613,7 @@ class RetargetingEvaluator:
             toe_names = ["LeftToeBase", "RightToeBase"]
             human_joints = np.load(str(npy_path))
             human_joints = transform_y_up_to_z_up(human_joints)
-            spine_joint_idx = self.demo_joints.index("Spine1")
+            spine_joint_idx = self.demo_joints.index(root_keypoint(self.demo_joints))
             # LAFAN-specific spine adjustment
             human_joints[:, spine_joint_idx, -1] -= 0.06
             smpl_scale = getattr(self.constants, "DEFAULT_SCALE_FACTOR", None) or 1.0

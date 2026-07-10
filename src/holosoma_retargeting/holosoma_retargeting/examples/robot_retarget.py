@@ -21,7 +21,7 @@ src_root = Path(__file__).resolve().parents[2]
 if str(src_root) not in sys.path:
     sys.path.insert(0, str(src_root))
 
-from holosoma_retargeting.config_types.data_type import DEMO_JOINTS_REGISTRY, MotionDataConfig  # noqa: E402
+from holosoma_retargeting.config_types.data_type import DEMO_JOINTS_REGISTRY, MotionDataConfig, root_keypoint  # noqa: E402
 from holosoma_retargeting.config_types.retargeter import RetargeterConfig  # noqa: E402
 from holosoma_retargeting.config_types.retargeting import RetargetingConfig  # noqa: E402
 from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
@@ -211,7 +211,7 @@ def load_motion_data(
 
             human_joints = np.load(str(npy_path))
             human_joints = transform_y_up_to_z_up(human_joints)
-            spine_joint_idx = constants.DEMO_JOINTS.index("Spine1")
+            spine_joint_idx = constants.DEMO_JOINTS.index(root_keypoint(constants.DEMO_JOINTS))
             # LAFAN-specific spine adjustment
             human_joints[:, spine_joint_idx, -1] -= 0.06
             smpl_scale = motion_data_config.default_scale_factor or 1.0
@@ -395,7 +395,7 @@ def _compute_q_init_base(
     """
     if task_type == "robot_only":
         if data_format == "lafan":
-            spine_joint_idx = constants.DEMO_JOINTS.index("Spine1")
+            spine_joint_idx = constants.DEMO_JOINTS.index(root_keypoint(constants.DEMO_JOINTS))
             human_quat_init = estimate_human_orientation(human_joints, constants.DEMO_JOINTS)
             # MuJoCo order: pos first, then quat
             q_init_base = np.concatenate(
@@ -416,10 +416,15 @@ def _compute_q_init_base(
     elif task_type == "climbing":
         if retargeter is None:
             raise ValueError("retargeter is required for climbing task")
-        _, human_quat_init = transform_from_human_to_world(
-            human_joints[0, 0, :], object_poses[0], np.array([0.0, 0.0, 0.0])
-        )
-        spine_joint_idx = retargeter.demo_joints.index("Spine1")
+        if data_format == "g1fk":
+            # robot-FK pseudo-source: the to-origin heuristic degenerates when the clip starts near the
+            # court origin; estimate yaw from the source skeleton instead
+            human_quat_init = estimate_human_orientation(human_joints, retargeter.demo_joints)
+        else:
+            _, human_quat_init = transform_from_human_to_world(
+                human_joints[0, 0, :], object_poses[0], np.array([0.0, 0.0, 0.0])
+            )
+        spine_joint_idx = retargeter.demo_joints.index(root_keypoint(retargeter.demo_joints))
         # MuJoCo order: pos first, then quat
         q_init_base = np.concatenate(
             [

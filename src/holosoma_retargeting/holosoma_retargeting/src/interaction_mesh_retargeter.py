@@ -738,6 +738,15 @@ class InteractionMeshRetargeter:
             problem.solve(solver=cp.CLARABEL, **solver_kwargs)
 
         if problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
+            # hcrl debug: report which hard constraints are already violated at dqa = 0
+            print(f"[infeasible-debug] frame {frame_idx}: step_size={self.step_size}")
+            for key, phi in phis.items():
+                if phi < 0.05:
+                    print(f"  pen pair {self._geom_names[key[0]]} vs {self._geom_names[key[1]]}: phi={phi:.4f}")
+            if self.activate_joint_limits:
+                lb_gap = (self.q_a_lb - q_a_n_last).max()
+                ub_gap = (q_a_n_last - self.q_a_ub).max()
+                print(f"  joint-limit worst gaps: lb {lb_gap:.4f}, ub {ub_gap:.4f} (>0 == already out of limits)")
             raise RuntimeError(f"CVXPY solve failed: {problem.status}")
 
         dqa_star = dqa.value

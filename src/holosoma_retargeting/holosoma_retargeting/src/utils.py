@@ -763,6 +763,18 @@ def estimate_human_orientation(human_joints, joint_names, frame_idx=0):
     Returns:
         np.ndarray: Quaternion [w, x, y, z] representing the human's global orientation
     """
+    # For g1fk (robot-FK pseudo-source): yaw from the hip lateral axis; no spine keypoint needed
+    if "pelvis_contour_link" in joint_names:
+        lhip = human_joints[frame_idx, joint_names.index("left_hip_pitch_link")]
+        rhip = human_joints[frame_idx, joint_names.index("right_hip_pitch_link")]
+        lat = lhip - rhip
+        lat[2] = 0.0
+        facing = np.cross(lat, np.array([0.0, 0.0, 1.0]))
+        n = np.linalg.norm(facing)
+        facing = facing / n if n > 1e-6 else np.array([1.0, 0.0, 0.0])
+        yaw = np.arctan2(facing[1], facing[0])
+        return np.array([np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)])  # wxyz
+
     # For LAFAN
     if "Hips" in joint_names:
         hips_idx = joint_names.index("Hips")
