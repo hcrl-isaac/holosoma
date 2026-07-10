@@ -89,15 +89,42 @@ def compute(src: np.ndarray, boxes: np.ndarray, disp_tol: float, height_tol: flo
     speed = np.zeros_like(clear)
     speed[1:] = np.linalg.norm(np.diff(toes[:, :, :2], axis=0), axis=2)
 
-    cand = np.stack(
-        [_still_mask(toes[:, k], disp_tol, half_win) & (clear[:, k] < height_tol) for k in range(2)], axis=1
-    )
-    # support invariant: unless truly airborne, the better-grounded foot is in stance
-    for t in range(len(cand)):
-        if not cand[t].any() and clear[t].min() < flight_tol:
-            k = int(np.argmin(clear[t] + speed[t]))
-            cand[t, k] = True
-    masks = np.stack([_smooth(cand[:, k]) for k in range(2)], axis=1)
+    # Global support-state labeling (Viterbi over {both, left, right, flight}): per-frame thresholds
+    # flash in and out on dirty sources, snapping feet to new anchors at every flicker. Emissions are
+    # POSITION-based (height above the terrain under the foot -- link velocity is contaminated by base
+    # drift and only vetoes at coarse scale); the switching penalty makes uncertainty PERSIST the
+    # current state instead of flipping it.
+    t_n = len(toes)
+    contact_cost = np.zeros((t_n, 2))
+    swing_cost = np.zeros((t_n, 2))
+    for k in range(2):
+        c = clear[:, k]
+        contact_cost[:, k] = np.maximum(0.0, c - 0.05) * 20.0 + np.maximum(0.0, speed[:, k] * 30.0 - 0.45) * 2.0
+        swing_cost[:, k] = np.maximum(0.0, 0.05 - c) * 20.0
+    STATES = ((True, True), (True, False), (False, True), (False, False))  # both, L, R, flight
+    emis = np.zeros((t_n, 4))
+    for si, (lc, rc) in enumerate(STATES):
+        emis[:, si] = (contact_cost[:, 0] if lc else swing_cost[:, 0]) + (
+            contact_cost[:, 1] if rc else swing_cost[:, 1]
+        )
+    emis[:, 3] += np.maximum(0.0, flight_tol - clear.min(axis=1)) * 10.0  # flight needs BOTH feet high
+    SWITCH = 1.2  # per-foot state change penalty: the persistence knob
+    trans = np.zeros((4, 4))
+    for a in range(4):
+        for b in range(4):
+            trans[a, b] = SWITCH * sum(STATES[a][f] != STATES[b][f] for f in range(2))
+    dp = np.full((t_n, 4), np.inf)
+    bk = np.zeros((t_n, 4), dtype=int)
+    dp[0] = emis[0]
+    for t in range(1, t_n):
+        tot = dp[t - 1][:, None] + trans
+        bk[t] = tot.argmin(axis=0)
+        dp[t] = tot.min(axis=0) + emis[t]
+    path = np.zeros(t_n, dtype=int)
+    path[-1] = int(dp[-1].argmin())
+    for t in range(t_n - 2, -1, -1):
+        path[t] = bk[t + 1, path[t + 1]]
+    masks = np.array([[STATES[si][0], STATES[si][1]] for si in path], dtype=bool)
 
     # calibrated toe-center offset above the surface when planted (per clip; sphere radius + skin)
     planted = clear[masks]
@@ -115,8 +142,9 @@ def compute(src: np.ndarray, boxes: np.ndarray, disp_tol: float, height_tol: flo
                 # full 3D anchor from the SOURCE stance: xy = where the source foot actually plants
                 # (anchoring to the OUTPUT's own position freezes a lagging foot mid-flight), z = the
                 # surface under that spot + calibrated toe offset
-                x_a = float(np.median(toes[t : e + 1, k, 0]))
-                y_a = float(np.median(toes[t : e + 1, k, 1]))
+                e_land = min(e, t + max(3, (e - t + 1) // 3))  # landing portion: before source drift accumulates
+                x_a = float(np.median(toes[t : e_land + 1, k, 0]))
+                y_a = float(np.median(toes[t : e_land + 1, k, 1]))
                 z_a = float(terrain_z(np.array([[x_a, y_a]]), boxes)[0]) + offset
                 windows[k].append([t, e, x_a, y_a, z_a])
                 t = e + 1
