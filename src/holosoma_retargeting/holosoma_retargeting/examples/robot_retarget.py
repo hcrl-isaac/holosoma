@@ -263,7 +263,8 @@ def load_motion_data(
 
     elif task_type == "climbing":
         task_dir = data_path / task_name
-        npy_files = list(task_dir.glob("*.npy"))
+        exact = task_dir / f"{task_name}.npy"
+        npy_files = [exact] if exact.exists() else [f for f in task_dir.glob("*.npy") if not f.stem.endswith("_q0")]
         if not npy_files:
             raise FileNotFoundError(f"No .npy file found in {task_dir}")
 
@@ -417,8 +418,12 @@ def _compute_q_init_base(
         if retargeter is None:
             raise ValueError("retargeter is required for climbing task")
         if data_format == "g1fk":
-            # robot-FK pseudo-source: the to-origin heuristic degenerates when the clip starts near the
-            # court origin; estimate yaw from the source skeleton instead
+            # robot-FK pseudo-source: the SOURCE csv carries the full initial pose -- init from it (the
+            # identity-retarget start; joints-at-zero sinks feet into thin terrain like the edge beam)
+            seq_dir = Path(constants.OBJECT_DIR)
+            q0_path = seq_dir / f"{seq_dir.name}_q0.npy"
+            if q0_path.exists():
+                return np.load(q0_path)
             human_quat_init = estimate_human_orientation(human_joints, retargeter.demo_joints)
         else:
             _, human_quat_init = transform_from_human_to_world(

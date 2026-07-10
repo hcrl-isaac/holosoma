@@ -11,7 +11,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 import pandas as pd
-from scipy.interpolate import CubicSpline
+from scipy.interpolate import PchipInterpolator
 from scipy.spatial.transform import Rotation, Slerp
 
 from holosoma_retargeting.hcrl.csv_to_g1fk import DEFAULT_MODEL
@@ -22,10 +22,10 @@ def qpos_to_csv(qpos: np.ndarray, model: mujoco.MjModel, columns: list[str], up:
     t = np.arange(len(qpos))
     t_hi = np.linspace(0, len(qpos) - 1, (len(qpos) - 1) * up + 1)
 
-    pos = CubicSpline(t, qpos[:, :3])(t_hi)
+    pos = PchipInterpolator(t, qpos[:, :3])(t_hi)  # monotone: no overshoot at direction changes
     rot = Rotation.from_quat(qpos[:, [4, 5, 6, 3]])  # wxyz -> xyzw for scipy
     quat = Slerp(t, rot)(t_hi).as_quat()  # xyzw
-    joints_model = CubicSpline(t, qpos[:, 7:])(t_hi)
+    joints_model = PchipInterpolator(t, qpos[:, 7:])(t_hi)
 
     # model hinge order -> csv column order
     model_joints = [model.joint(j).name for j in range(model.njnt) if model.joint(j).type != mujoco.mjtJoint.mjJNT_FREE]

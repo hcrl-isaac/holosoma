@@ -27,7 +27,7 @@ import pandas as pd
 
 from holosoma_retargeting.config_types.data_type import G1FK_DEMO_JOINTS, TOE_NAMES_BY_FORMAT
 from holosoma_retargeting.hcrl import courts_to_scene, stance_windows
-from holosoma_retargeting.hcrl.csv_to_g1fk import DEFAULT_MODEL, fk_positions
+from holosoma_retargeting.hcrl.csv_to_g1fk import DEFAULT_MODEL, fk_positions, qpos_row
 from holosoma_retargeting.hcrl.qpos_to_csv import qpos_to_csv
 
 PKG = Path(__file__).resolve().parents[1]
@@ -38,6 +38,7 @@ def prep_clip(csv_path: Path, court: dict, court_boxes: np.ndarray, seq_dir: Pat
               robot_xml: Path) -> None:
     seq_dir.mkdir(parents=True, exist_ok=True)
     np.save(seq_dir / f"{seq_dir.name}.npy", fk_positions(model, csv_path))
+    np.save(seq_dir / f"{seq_dir.name}_q0.npy", qpos_row(model, csv_path))
     courts_to_scene.build_court_files(court, seq_dir, robot_xml)
     src = np.load(seq_dir / f"{seq_dir.name}.npy")[:: stance_windows.DOWNSAMPLE]
     masks, wl, wr = stance_windows.compute(src, court_boxes, 0.04, 0.09, 0.15, 2)

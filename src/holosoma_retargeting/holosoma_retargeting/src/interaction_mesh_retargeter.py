@@ -638,6 +638,23 @@ class InteractionMeshRetargeter:
         if apply_foot_sticking or apply_foot_lock:
             J_WF_dict, p_WF_dict, _ = self._calc_manipulator_jacobians(q, links=self.foot_links, obj_frame=False)
 
+            # HARD Cartesian foot velocity cap (every frame, both feet): constraint releases and mesh
+            # pulls must never teleport a foot -- physically impossible foot motion is excluded in the
+            # QP itself rather than depending on contact detection being right. Cap per 30 fps frame.
+            if self.foot_lock.enable and not init_t:
+                _, p_last_all, _ = self._calc_manipulator_jacobians(q_t_last, links=self.foot_links, obj_frame=False)
+                FOOT_STEP_MAX = 0.07  # m/frame ~= 2.1 m/s: above stance noise, at natural swing peak
+                for key, J_WF in J_WF_dict.items():
+                    if self.foot_lock.lock_links_substr and self.foot_lock.lock_links_substr not in key:
+                        continue
+                    already = p_WF_dict[key] - p_last_all[key]  # displacement accrued at linearization pt
+                    Jc = J_WF[:3, self.q_a_indices]
+                    for axis in range(3):
+                        constraints += [
+                            Jc[axis] @ dqa >= -FOOT_STEP_MAX - already[axis],
+                            Jc[axis] @ dqa <= FOOT_STEP_MAX - already[axis],
+                        ]
+
             # Foot sticking: constrain XY to stay near previous frame position
             if apply_foot_sticking:
                 _, p_WF_t_last_dict, _ = self._calc_manipulator_jacobians(
@@ -688,12 +705,14 @@ class InteractionMeshRetargeter:
                         Ja = J_WF[axis, self.q_a_indices]
                         foot_anchor_terms.append(cp.square(Ja @ dqa - delta))
 
-        # Non-penetration constraints
+        # Non-penetration constraints. Sources can START inside geometry (that is the defect being
+        # cleaned); demanding full escape in one linearized step is jointly infeasible, so cap the
+        # per-iteration escape rate -- existing penetration decays over a few iterations instead.
         Js, phis = self._update_jacobians_and_phis_from_q(q)
         for key, phi in phis.items():
             Ja_n_full = Js[key]
             Ja_n = Ja_n_full[self.q_a_indices]
-            rhs = -phi - self.penetration_tolerance
+            rhs = min(-phi - self.penetration_tolerance, 0.02)
             constraints += [Ja_n @ dqa >= rhs]
 
         # Self-collision constraints
@@ -891,6 +910,36 @@ class InteractionMeshRetargeter:
             if np.isclose(cost, last_cost):
                 break
             last_cost = cost
+
+        # HARD teleport guarantee on the FINAL pose: the in-QP velocity cap bounds the LINEARIZED step,
+        # and linearization error across SQP iterations lets the true step overshoot. Backtrack the
+        # whole frame update (nonlinear FK check) until no toe moves more than FOOT_STEP_MAX from the
+        # previous frame -- physically impossible foot motion cannot leave this function.
+        if self.foot_lock.enable and not init_t:
+            FOOT_STEP_MAX = 0.075
+
+            def _max_toe_step(q_test: np.ndarray) -> float:
+                _, p_now, _ = self._calc_manipulator_jacobians(q_test, links=self.foot_links, obj_frame=False)
+                _, p_prev, _ = self._calc_manipulator_jacobians(q_t_last, links=self.foot_links, obj_frame=False)
+                steps = [
+                    float(np.linalg.norm(p_now[k] - p_prev[k]))
+                    for k in p_now
+                    if (not self.foot_lock.lock_links_substr) or self.foot_lock.lock_links_substr in k
+                ]
+                return max(steps) if steps else 0.0
+
+            if _max_toe_step(q_n) > FOOT_STEP_MAX:
+                lo, hi = 0.0, 1.0
+                for _ in range(12):
+                    mid = 0.5 * (lo + hi)
+                    q_mid = q_t_last + mid * (q_n - q_t_last)
+                    q_mid[3:7] /= np.linalg.norm(q_mid[3:7])  # keep the base quat unit under blending
+                    if _max_toe_step(q_mid) > FOOT_STEP_MAX:
+                        hi = mid
+                    else:
+                        lo = mid
+                q_n = q_t_last + lo * (q_n - q_t_last)
+                q_n[3:7] /= np.linalg.norm(q_n[3:7])
         return q_n, cost
 
     def _draw_self_collision_geoms(self):

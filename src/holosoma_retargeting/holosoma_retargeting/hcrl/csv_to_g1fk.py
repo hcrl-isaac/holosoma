@@ -18,6 +18,22 @@ PKG_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL = PKG_ROOT / "models" / "g1" / "g1_29dof_spherehand.xml"
 
 
+def qpos_row(model: mujoco.MjModel, csv_path: Path, row_idx: int = 0) -> np.ndarray:
+    """One csv row as a mujoco qpos vector (freejoint xyz + wxyz, then joints in model order)."""
+    df = pd.read_csv(csv_path, nrows=row_idx + 1)
+    row = df.to_numpy(dtype=np.float64)[row_idx]
+    joint_cols = list(df.columns[7:])
+    q = np.zeros(model.nq)
+    q[:3] = row[:3]
+    q[3:7] = (row[6], row[3], row[4], row[5])  # xyzw -> wxyz
+    for name, val in zip(joint_cols, row[7:]):
+        for j in range(model.njnt):
+            if model.joint(j).name == name:
+                q[model.jnt_qposadr[j]] = val
+                break
+    return q
+
+
 def fk_positions(model: mujoco.MjModel, csv_path: Path) -> np.ndarray:
     """FK a csv clip into (T, len(G1FK_DEMO_JOINTS), 3) world link positions."""
     df = pd.read_csv(csv_path)
@@ -61,6 +77,7 @@ def main() -> None:
         seq_dir.mkdir(parents=True, exist_ok=True)
         pos = fk_positions(model, csv_path)
         np.save(seq_dir / f"{csv_path.stem}.npy", pos)
+        np.save(seq_dir / f"{csv_path.stem}_q0.npy", qpos_row(model, csv_path))
         print(f"[g1fk] {csv_path.stem}: {pos.shape} -> {seq_dir}")
 
 
