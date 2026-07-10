@@ -22,6 +22,10 @@ class FootLockConfig:
     tolerance: float = 5e-3
     """Tolerance for Z floor pinning constraints."""
 
+    lock_links_substr: str | None = None
+    """Only foot links whose name contains this substring are Z-locked (None = all foot links).
+    Locking every sphere forces an instant flat-foot mid-roll; locking just the toe keeps ankle freedom."""
+
 
 @dataclass(frozen=True)
 class SelfCollisionConfig:

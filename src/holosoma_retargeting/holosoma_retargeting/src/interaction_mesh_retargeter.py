@@ -188,15 +188,21 @@ class InteractionMeshRetargeter:
                 side = "right"
             if side is None:
                 continue
-
-            normalized_windows: list[tuple[int, int]] = []
+            # windows may be (start, end), (start, end, z), or (start, end, x, y, z); normalize to
+            # (start, end, x|None, y|None, z|None)
+            normalized_windows: list[tuple] = []
             for window in windows:
-                if len(window) != 2:
+                if len(window) not in (2, 3, 5):
                     raise ValueError(f"Invalid foot lock window for {key}: {window}")
                 start, end = int(window[0]), int(window[1])
                 if end < start:
                     raise ValueError(f"Invalid foot lock window with end < start for {key}: {window}")
-                normalized_windows.append((start, end))
+                if len(window) == 5:
+                    normalized_windows.append((start, end, float(window[2]), float(window[3]), float(window[4])))
+                elif len(window) == 3:
+                    normalized_windows.append((start, end, None, None, float(window[2])))
+                else:
+                    normalized_windows.append((start, end, None, None, None))
             self._foot_lock_windows[side] = tuple(normalized_windows)
 
     def _init_self_collision(self, self_collision: SelfCollisionConfig | None) -> None:
@@ -628,6 +634,7 @@ class InteractionMeshRetargeter:
         # Foot constraints (sticking + foot lock window Z pinning)
         apply_foot_sticking = (self.q_a_init_idx < 12) and self.activate_foot_sticking
         apply_foot_lock = (self.q_a_init_idx < 12) and self.foot_lock.enable
+        foot_anchor_terms = []
         if apply_foot_sticking or apply_foot_lock:
             J_WF_dict, p_WF_dict, _ = self._calc_manipulator_jacobians(q, links=self.foot_links, obj_frame=False)
 
@@ -646,8 +653,9 @@ class InteractionMeshRetargeter:
                     raise ValueError("foot_sticking must include one left* and one right* key")
 
                 for key, J_WF in J_WF_dict.items():
-                    apply_left = ("left" in key) and foot_sticking[left_key]
-                    apply_right = ("right" in key) and foot_sticking[right_key]
+                    anchor_active = self.foot_lock.enable and self._foot_lock_anchor(key, frame_idx) is not None
+                    apply_left = ("left" in key) and foot_sticking[left_key] and not anchor_active
+                    apply_right = ("right" in key) and foot_sticking[right_key] and not anchor_active
                     if apply_left or apply_right:
                         p_lb = p_WF_t_last_dict[key] - p_WF_dict[key] - self.foot_sticking_tolerance
                         p_ub = p_lb + 2 * self.foot_sticking_tolerance  # symmetric window
@@ -660,17 +668,25 @@ class InteractionMeshRetargeter:
 
             # Foot lock windows: pin Z to floor within configured frame ranges
             if apply_foot_lock:
+                foot_anchor_terms = []
                 for key, J_WF in J_WF_dict.items():
-                    if not self._is_foot_locked_in_window(key, frame_idx):
+                    if self.foot_lock.lock_links_substr and self.foot_lock.lock_links_substr not in key:
+                        continue
+                    anchor = self._foot_lock_anchor(key, frame_idx)
+                    if anchor is None:
                         continue
 
-                    z_anchor = self.foot_lock.z_floor
-                    z_delta = z_anchor - p_WF_dict[key][2]
-                    Jz = J_WF[2, self.q_a_indices]
-                    constraints += [
-                        Jz @ dqa >= z_delta - self.foot_lock.tolerance,
-                        Jz @ dqa <= z_delta + self.foot_lock.tolerance,
-                    ]
+                    # strong SOFT pull toward the source plant position (<= 4 cm/frame/axis). A hard
+                    # band is jointly infeasible whenever the lagging foot's straight-line path to the
+                    # anchor grazes terrain (non-penetration blocks the required step); as an objective,
+                    # non-penetration steers the foot around the corner over a few frames instead.
+                    p_now = p_WF_dict[key]
+                    for axis, a_val in enumerate(anchor):
+                        if a_val is None:
+                            continue
+                        delta = float(np.clip(a_val - p_now[axis], -0.04, 0.04))
+                        Ja = J_WF[axis, self.q_a_indices]
+                        foot_anchor_terms.append(cp.square(Ja @ dqa - delta))
 
         # Non-penetration constraints
         Js, phis = self._update_jacobians_and_phis_from_q(q)
@@ -703,6 +719,10 @@ class InteractionMeshRetargeter:
         obj_terms = []
 
         obj_terms.append(cp.sum_squares(cp.multiply(sqrt_w3, lap_var - target_lap_vec)))
+
+        # foot anchor pull (see foot-lock block): heavily weighted so stance feet land and stay planted
+        if apply_foot_lock and foot_anchor_terms:
+            obj_terms.append(200.0 * cp.sum(cp.hstack(foot_anchor_terms)))
 
         # nominal tracking for selected indices
         if (w_nominal_tracking > 0) and (q_a_nominal is not None):
@@ -769,7 +789,18 @@ class InteractionMeshRetargeter:
         if side is None:
             return False
 
-        return any(start <= frame_idx <= end for start, end in self._foot_lock_windows.get(side, ()))
+        return any(w[0] <= frame_idx <= w[1] for w in self._foot_lock_windows.get(side, ()))
+
+    def _foot_lock_anchor(self, foot_link_key: str, frame_idx: int) -> tuple | None:
+        """(x|None, y|None, z) anchor for a locked foot at this frame (z falls back to the global floor)."""
+        key_lower = foot_link_key.lower()
+        side = "left" if "left" in key_lower else ("right" if "right" in key_lower else None)
+        if side is None:
+            return None
+        for start, end, x, y, z in self._foot_lock_windows.get(side, ()):
+            if start <= frame_idx <= end:
+                return (x, y, z if z is not None else float(self.foot_lock.z_floor))
+        return None
 
     def _compute_self_collision_constraints(self, frame_idx: int):
         """Compute Jacobians and distances for self-collision body pairs.

@@ -665,6 +665,32 @@ def main(cfg: RetargetingConfig) -> None:
 
     # Create retargeter
     retargeter_kwargs = build_retargeter_kwargs_from_config(cfg.retargeter, constants, object_urdf_path, task_type)
+    # hcrl: per-window foot z-lock from precomputed stance windows (see hcrl/stance_windows.py) --
+    # xy sticking alone stops skate but nothing pulls a hovering source foot DOWN to the surface.
+    _stick_path = data_path / task_name / f"{task_name}_foot_sticking.npz" if task_type == "climbing" else None
+    if _stick_path is not None and _stick_path.exists():
+        _sw = np.load(_stick_path, allow_pickle=True)
+        if "windows_left" in _sw and "windows_right" in _sw:
+            from holosoma_retargeting.config_types.retargeter import FootLockConfig
+
+            # the anchored link must be a constrainable foot link; add the toe spheres (the stance
+            # detector's keypoint) to the sticking-link set the Jacobians are built for
+            _tc = retargeter_kwargs["task_constants"]
+            for _toe in ("left_ankle_roll_sphere_5_link", "right_ankle_roll_sphere_5_link"):
+                if _toe not in _tc.FOOT_STICKING_LINKS:
+                    _tc.FOOT_STICKING_LINKS = [*_tc.FOOT_STICKING_LINKS, _toe]
+
+            retargeter_kwargs["foot_lock"] = FootLockConfig(
+                enable=True,
+                windows={
+                    "left": [tuple(w) for w in _sw["windows_left"]],
+                    "right": [tuple(w) for w in _sw["windows_right"]],
+                },
+                tolerance=0.01,
+                lock_links_substr="sphere_5",  # the toe sphere: one 3D-anchored point per foot, ankle roll stays free
+            )
+            logger.info("Foot z-lock windows: L %d / R %d", len(_sw["windows_left"]), len(_sw["windows_right"]))
+
     retargeter = InteractionMeshRetargeter(**retargeter_kwargs)
     logger.info("Retargeter created")
 
