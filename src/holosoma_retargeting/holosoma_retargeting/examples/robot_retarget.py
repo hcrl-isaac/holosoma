@@ -695,8 +695,24 @@ def main(cfg: RetargetingConfig) -> None:
         augmentation_translation=_AUGMENTATION_TRANSLATION,
     )
 
-    # Extract foot sticking sequences
-    foot_sticking_sequences = extract_foot_sticking_sequence_velocity(human_joints, retargeter.demo_joints, toe_names)
+    # Extract foot sticking sequences. A precomputed override (hcrl/stance_windows.py: position+height
+    # rule against the terrain) takes priority -- the velocity heuristic finds nothing on IK-retargeted
+    # sources whose stance feet skate faster than 1 cm/s.
+    sticking_file = data_path / task_name / f"{task_name}_foot_sticking.npz" if task_type == "climbing" else None
+    if sticking_file is not None and sticking_file.exists():
+        _stick = np.load(sticking_file, allow_pickle=True)
+        _mask = _stick["sticking"]  # (T, 2) bool for [left, right] toes at solver rate
+        _toes = [str(t) for t in _stick["toe_names"]]
+        foot_sticking_sequences = [
+            {_toes[0]: bool(_mask[min(t, len(_mask) - 1), 0]), _toes[1]: bool(_mask[min(t, len(_mask) - 1), 1])}
+            for t in range(len(human_joints))
+        ]
+        logger.info("Loaded foot sticking override: %s (L %.0f%% / R %.0f%%)",
+                    sticking_file.name, 100 * _mask[:, 0].mean(), 100 * _mask[:, 1].mean())
+    else:
+        foot_sticking_sequences = extract_foot_sticking_sequence_velocity(
+            human_joints, retargeter.demo_joints, toe_names
+        )
 
     # Task-specific foot sticking adjustments
     if task_type == "object_interaction":
