@@ -173,6 +173,28 @@ SMPLX_DEMO_JOINTS = [
     "R_Wrist",
 ]
 
+
+# hcrl g1fk format: G1 FK world link positions used as a robot-sized pseudo-source (identity mapping).
+# Source csvs are already-retargeted G1 motions (BONES-SEED); the constrained solve re-projects them
+# onto reconstructed terrain with hard contact/penetration/velocity constraints.
+G1FK_DEMO_JOINTS = [
+    "pelvis_contour_link",
+    "left_hip_pitch_link",
+    "left_knee_link",
+    "left_ankle_intermediate_1_link",
+    "left_ankle_roll_sphere_5_link",
+    "right_hip_pitch_link",
+    "right_knee_link",
+    "right_ankle_intermediate_1_link",
+    "right_ankle_roll_sphere_5_link",
+    "left_shoulder_roll_link",
+    "left_elbow_link",
+    "left_sphere_hand_link",
+    "right_shoulder_roll_link",
+    "right_elbow_link",
+    "right_sphere_hand_link",
+]
+
 # Joint mappings - organized by (data_format, robot_type)
 JOINTS_MAPPINGS = {
     ("lafan", "g1"): {
@@ -260,6 +282,7 @@ JOINTS_MAPPINGS = {
         "L_Wrist": "left_rubber_hand_link",
         "R_Wrist": "right_rubber_hand_link",
     },
+    ("g1fk", "g1"): {j: j for j in G1FK_DEMO_JOINTS},
     ("mocap", "g1"): {
         "Spine1": "pelvis_contour_link",
         "LeftUpLeg": "left_hip_pitch_link",
@@ -301,6 +324,7 @@ TOE_NAMES_BY_FORMAT = {
     "lafan": ["LeftToeBase", "RightToeBase"],
     "smplh": ["L_Toe", "R_Toe"],
     "mocap": ["LeftToeBase", "RightToeBase"],
+    "g1fk": ["left_ankle_roll_sphere_5_link", "right_ankle_roll_sphere_5_link"],
     "smplx": ["L_Foot", "R_Foot"],
 }
 
@@ -318,6 +342,9 @@ DATA_FORMAT_CONSTANTS: dict[str, FormatConstants] = {
     "mocap": {
         "default_human_height": 1.78,
     },
+    "g1fk": {
+        "default_human_height": 1.32,  # = G1 robot height -> smpl_scale 1 (source is robot-sized)
+    },
 }
 
 # Unified registry: Maps format name to demo joints
@@ -327,6 +354,7 @@ DEMO_JOINTS_REGISTRY: dict[str, list[str]] = {
     "lafan": LAFAN_DEMO_JOINTS,
     "smplh": SMPLH_DEMO_JOINTS,
     "mocap": MOCAP_DEMO_JOINTS,
+    "g1fk": G1FK_DEMO_JOINTS,
     "smplx": SMPLX_DEMO_JOINTS,
 }
 
