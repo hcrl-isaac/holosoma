@@ -49,6 +49,12 @@ from holosoma_retargeting.src.utils import (  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+
+def _envf(name: str, default: float) -> float:
+    """Float override from the environment (the hcrl prior weights; see the v3 block in main())."""
+    return float(os.environ.get(name, default))
+
+
 # ----------------------------- Constants -----------------------------
 
 # Task-specific defaults
@@ -699,6 +705,44 @@ def main(cfg: RetargetingConfig) -> None:
     retargeter = InteractionMeshRetargeter(**retargeter_kwargs)
     logger.info("Retargeter created")
 
+    # hcrl: anti-oscillation damping when stance windows are active -- with the toe anchored and
+    # sole-sphere XY stuck, the lateral-lean null space is near-tied and flips at 15 Hz (ankle-roll
+    # rocking, mm-scale root wobble). Ankle roll gets velocity damping (stance roll velocity ~ 0);
+    # everything else gets acceleration damping, which is free on smooth motion so it cannot drag.
+    if retargeter.foot_lock.enable and retargeter.q_a_init_idx == -7:
+        _w = np.full(retargeter.nq_a, float(retargeter.smooth_weight))
+        for _jn in ("left_ankle_roll_joint", "right_ankle_roll_joint"):
+            _w[retargeter.robot_model.jnt_qposadr[retargeter.robot_model.joint(_jn).id]] = 3.0
+        retargeter.smooth_weight = _w
+        # 1.0 is the sweet spot: 4.0 carries momentum through landings (foot/root overshoot then correct)
+        retargeter.accel_damp_weight = 1.0
+        # stance foot-orientation engagement: yaw frozen at entry + terrain-flat pitch/roll, ramped +
+        # slew-limited -- position pins alone snap the ankle attitude the frame a window binds
+        retargeter.foot_orient_weight = 30.0
+        # hcrl v3 (terrain-bfm §4.6): the G1's ROM is narrower than the human's and nothing penalized
+        # riding a stop, so the solve parked joints on their limits (waist_pitch 54% of frames,
+        # ankle_roll 35% in `edge`). Barrier keeps a margin; the pelvis/arm priors remove the null
+        # spaces that made the solver WANT the stop in the first place. Env-overridable so the weight
+        # ablation sweeps without editing code (HCRL_JL_W=0 HCRL_PELVIS_W=0 ... == the v1 corpus).
+        retargeter.joint_limit_barrier_weight = _envf("HCRL_JL_W", 50.0)
+        retargeter.joint_limit_barrier_margin = _envf("HCRL_JL_MARGIN", 0.10)  # rad, capped by _FRAC
+        retargeter.joint_limit_barrier_margin_frac = _envf("HCRL_JL_MARGIN_FRAC", 0.15)
+        # comma-separated joint names, or unset = every actuated joint
+        _jl_joints = os.environ.get("HCRL_JL_JOINTS", "").strip()
+        retargeter.joint_limit_barrier_joints = tuple(_jl_joints.split(",")) if _jl_joints else None
+        retargeter.pelvis_track_weight = _envf("HCRL_PELVIS_W", 5.0)
+        retargeter.arm_reg_weight = _envf("HCRL_ARM_W", 2.0)
+        retargeter.swing_ankle_weight = _envf("HCRL_SWING_ANKLE_W", 0.5)
+        logger.info(
+            "hcrl v3 priors: jl_w=%.1f margin=%.3f/%.2f pelvis=%.1f arm=%.1f swing_ankle=%.2f",
+            retargeter.joint_limit_barrier_weight,
+            retargeter.joint_limit_barrier_margin,
+            retargeter.joint_limit_barrier_margin_frac,
+            retargeter.pelvis_track_weight,
+            retargeter.arm_reg_weight,
+            retargeter.swing_ankle_weight,
+        )
+
     # Preprocess motion data
     if task_type == "robot_only":
         human_joints = preprocess_motion_data(human_joints, retargeter, toe_names, smpl_scale)
@@ -740,6 +784,22 @@ def main(cfg: RetargetingConfig) -> None:
         ]
         logger.info("Loaded foot sticking override: %s (L %.0f%% / R %.0f%%)",
                     sticking_file.name, 100 * _mask[:, 0].mean(), 100 * _mask[:, 1].mean())
+
+        # hcrl: per-clip toe-step cap from the SOURCE -- real flight phases (jumps) legitimately exceed
+        # the 7.5 cm/frame default; cap at source x1.2 there, keep the tight default in/near stances.
+        _toe_idx = [retargeter.demo_joints.index(t) for t in toe_names]
+        _src_toes = human_joints[:, _toe_idx]
+        _steps = np.zeros((len(human_joints), 2))
+        _steps[1:] = np.linalg.norm(np.diff(_src_toes, axis=0), axis=2)
+        _steps = np.maximum(_steps, np.roll(_steps, 1, axis=0))  # 2-frame max: tolerate phase offsets
+        _cap = np.maximum(0.075, 1.2 * _steps)
+        for _side, _k in (("windows_left", 0), ("windows_right", 1)):
+            for _win in _stick[_side]:
+                _s0, _s1 = max(int(_win[0]) - 1, 0), min(int(_win[1]) + 1, len(_cap) - 1)
+                _cap[_s0 : _s1 + 1, _k] = 0.075
+        retargeter.foot_step_max_seq = _cap
+        logger.info("Toe-step cap: default 0.075, per-clip max L %.3f / R %.3f m/frame",
+                    _cap[:, 0].max(), _cap[:, 1].max())
     else:
         foot_sticking_sequences = extract_foot_sticking_sequence_velocity(
             human_joints, retargeter.demo_joints, toe_names

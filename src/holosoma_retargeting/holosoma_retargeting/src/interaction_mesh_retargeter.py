@@ -105,6 +105,17 @@ class InteractionMeshRetargeter:
         # Setup weights and parameters
         self.laplacian_weights = 10
         self.smooth_weight = 0.2
+        self.accel_damp_weight = 0.0  # acceleration damping: zero-cost at constant velocity (anti-oscillation)
+        self.foot_step_max_seq = None  # optional (T, 2) [left, right] per-frame toe-step caps (flight phases)
+        self.foot_orient_weight = 0.0  # stance-engagement foot angular-rate damping (0 = off; _foot_orient_damp)
+        self.joint_limit_barrier_weight = 0.0  # one-sided hinge inside `margin` of an actuated stop
+        self.joint_limit_barrier_margin = 0.0  # rad, absolute cap; 0 disables the barrier
+        self.joint_limit_barrier_margin_frac = 0.15  # and never more than this fraction of the range
+        self.joint_limit_barrier_min_range = 0.15  # rad; below this the joint is a deliberate clamp, skip
+        self.joint_limit_barrier_joints = None  # optional (name, ...): barrier ONLY these joints
+        self.pelvis_track_weight = 0.0  # source-pelvis position prior (kills the pelvis<->waist null space)
+        self.arm_reg_weight = 0.0  # source-arm position prior (stops the solver parking a redundant arm)
+        self.swing_ankle_weight = 0.0  # neutral-ankle prior while a foot is in free swing
         # Tolerance for foot sticking constraints in x, y.
         self.foot_sticking_tolerance = foot_sticking_tolerance
         self._init_foot_lock(foot_lock)
@@ -163,6 +174,17 @@ class InteractionMeshRetargeter:
             self.task_constants.MANUAL_UB.values()
         )
 
+        # dqa rows that are actuated joints: qpos < 7 is the floating base (free translation + a
+        # quaternion whose MANUAL_LB/UB box is +-1), which must never see the joint-limit barrier.
+        self._actuated_rows = np.flatnonzero(self.q_a_indices >= 7)
+        self._ankle_rows = {
+            side: self._resolve_joint_rows((f"{side}_ankle_pitch_joint", f"{side}_ankle_roll_joint"))
+            for side in ("left", "right")
+        }
+        # G1FK keypoint order: 0 = pelvis, 9-14 = both arms (shoulder_roll, elbow, hand)
+        self._pelvis_kp = 0
+        self._arm_kps = (9, 10, 11, 12, 13, 14)
+
         # Prevent too much waist twist
         self.Q_diag = np.zeros(self.nq_a) * 1e-3
         self.Q_diag[np.array(list(self.task_constants.MANUAL_COST.keys())).astype(int)] = list(
@@ -172,6 +194,40 @@ class InteractionMeshRetargeter:
         self.w_nominal_tracking_init = w_nominal_tracking_init
         self.nominal_tracking_tau = nominal_tracking_tau
         self.track_nominal_indices = task_constants.NOMINAL_TRACKING_INDICES
+
+    def _barrier_rows_and_margins(self) -> tuple[np.ndarray, np.ndarray]:
+        """Actuated dqa rows that get a joint-limit barrier, and each one's margin (rad).
+
+        The margin is RELATIVE (a fraction of the joint's own range, capped by the absolute value):
+        a flat margin would spend 38% of ankle_roll's tiny +-0.262 range, and `edge` clips genuinely
+        need that range. Joints deliberately clamped to a sliver -- wrist_yaw is held at +-0.05 rad on
+        purpose, and is the most "saturated" joint in the corpus BY DESIGN -- are skipped outright.
+
+        ``joint_limit_barrier_joints`` narrows it further to a named set. A BLANKET barrier measurably
+        fights stairs descent (lowering the body wants knee/ankle near their stops, and `settle`
+        regresses); restricting it to the joints where saturation is an actual measured defect keeps
+        the rest of the leg free.
+        """
+        rows = (
+            self._actuated_rows
+            if self.joint_limit_barrier_joints is None
+            else self._resolve_joint_rows(tuple(self.joint_limit_barrier_joints))
+        )
+        rng = self.q_a_ub[rows] - self.q_a_lb[rows]
+        keep = rng > self.joint_limit_barrier_min_range
+        rows, rng = rows[keep], rng[keep]
+        margins = np.minimum(float(self.joint_limit_barrier_margin), self.joint_limit_barrier_margin_frac * rng)
+        return rows, margins
+
+    def _resolve_joint_rows(self, joint_names: tuple[str, ...]) -> np.ndarray:
+        """dqa rows for named joints (qpos address -> position within q_a_indices); [] if absent."""
+        rows = []
+        for name in joint_names:
+            adr = self.robot_model.jnt_qposadr[self.robot_model.joint(name).id]
+            hit = np.flatnonzero(self.q_a_indices == adr)
+            if hit.size:
+                rows.append(int(hit[0]))
+        return np.array(rows, dtype=int)
 
     def _init_foot_lock(self, foot_lock: FootLockConfig | None) -> None:
         """Initialize foot lock configuration and normalize window mappings."""
@@ -188,21 +244,26 @@ class InteractionMeshRetargeter:
                 side = "right"
             if side is None:
                 continue
-            # windows may be (start, end), (start, end, z), or (start, end, x, y, z); normalize to
-            # (start, end, x|None, y|None, z|None)
+            # windows may be (start, end), (start, end, z), (start, end, x, y, z), or additionally carry
+            # a stance attitude (start, end, x, y, z, yaw, pitch); normalize to
+            # (start, end, x|None, y|None, z|None, yaw|None, pitch|None)
             normalized_windows: list[tuple] = []
             for window in windows:
-                if len(window) not in (2, 3, 5):
+                if len(window) not in (2, 3, 5, 7):
                     raise ValueError(f"Invalid foot lock window for {key}: {window}")
                 start, end = int(window[0]), int(window[1])
                 if end < start:
                     raise ValueError(f"Invalid foot lock window with end < start for {key}: {window}")
-                if len(window) == 5:
-                    normalized_windows.append((start, end, float(window[2]), float(window[3]), float(window[4])))
+                if len(window) == 7:
+                    normalized_windows.append((start, end, *(float(v) for v in window[2:7])))
+                elif len(window) == 5:
+                    normalized_windows.append(
+                        (start, end, float(window[2]), float(window[3]), float(window[4]), None, None)
+                    )
                 elif len(window) == 3:
-                    normalized_windows.append((start, end, None, None, float(window[2])))
+                    normalized_windows.append((start, end, None, None, float(window[2]), None, None))
                 else:
-                    normalized_windows.append((start, end, None, None, None))
+                    normalized_windows.append((start, end, None, None, None, None, None))
             self._foot_lock_windows[side] = tuple(normalized_windows)
 
     def _init_self_collision(self, self_collision: SelfCollisionConfig | None) -> None:
@@ -479,6 +540,8 @@ class InteractionMeshRetargeter:
                     init_t=i == 0,
                     n_iter=50 if i == 0 else 10,
                     frame_idx=i,
+                    q_t_last2=retargeted_motions[-2] if len(retargeted_motions) >= 2 else None,
+                    human_src_pts=human_mapped_joints_in_object,
                 )
                 if self.debug:
                     robot_link_positions = self._get_robot_link_positions(
@@ -570,6 +633,8 @@ class InteractionMeshRetargeter:
         verbose=False,
         init_t=False,
         frame_idx: int = 0,
+        q_t_last2: np.ndarray | None = None,
+        human_src_pts: np.ndarray | None = None,
     ):
         """The main function to solve a single iteration of the DiffIK problem.
         Args:
@@ -583,6 +648,8 @@ class InteractionMeshRetargeter:
             obj_original: the original object pose (used for contact matching).
             init_t: the current time step is the first time step.
             frame_idx: frame index used by explicit foot lock window constraints.
+            human_src_pts: (15, 3) scaled source keypoints for this frame, in the SAME frame as
+                ``p_OC_dict`` (object frame), i.e. what the Laplacian target was built from.
         """
         assert len(q_a_n_last) == self.nq_a
 
@@ -635,6 +702,7 @@ class InteractionMeshRetargeter:
         apply_foot_sticking = (self.q_a_init_idx < 12) and self.activate_foot_sticking
         apply_foot_lock = (self.q_a_init_idx < 12) and self.foot_lock.enable
         foot_anchor_terms = []
+        foot_orient_terms = []
         if apply_foot_sticking or apply_foot_lock:
             J_WF_dict, p_WF_dict, _ = self._calc_manipulator_jacobians(q, links=self.foot_links, obj_frame=False)
 
@@ -643,16 +711,16 @@ class InteractionMeshRetargeter:
             # QP itself rather than depending on contact detection being right. Cap per 30 fps frame.
             if self.foot_lock.enable and not init_t:
                 _, p_last_all, _ = self._calc_manipulator_jacobians(q_t_last, links=self.foot_links, obj_frame=False)
-                FOOT_STEP_MAX = 0.07  # m/frame ~= 2.1 m/s: above stance noise, at natural swing peak
                 for key, J_WF in J_WF_dict.items():
                     if self.foot_lock.lock_links_substr and self.foot_lock.lock_links_substr not in key:
                         continue
+                    step_max = self._foot_step_cap(frame_idx, key) - 0.005  # in-QP slightly under backtrack
                     already = p_WF_dict[key] - p_last_all[key]  # displacement accrued at linearization pt
                     Jc = J_WF[:3, self.q_a_indices]
                     for axis in range(3):
                         constraints += [
-                            Jc[axis] @ dqa >= -FOOT_STEP_MAX - already[axis],
-                            Jc[axis] @ dqa <= FOOT_STEP_MAX - already[axis],
+                            Jc[axis] @ dqa >= -step_max - already[axis],
+                            Jc[axis] @ dqa <= step_max - already[axis],
                         ]
 
             # Foot sticking: constrain XY to stay near previous frame position
@@ -691,6 +759,15 @@ class InteractionMeshRetargeter:
                         continue
                     anchor = self._foot_lock_anchor(key, frame_idx)
                     if anchor is None:
+                        # anticipatory approach shaping: blend the last 4 swing frames toward the
+                        # UPCOMING anchor (cosine ramp into t0) so the foot arrives with ~0 settle
+                        a_ramp, approach = self._foot_approach_anchor(key, frame_idx)
+                        if approach is not None and not init_t:
+                            p_now = p_WF_dict[key]
+                            for axis, a_val in enumerate(approach):
+                                delta = float(np.clip(a_val - p_now[axis], -0.04, 0.04))
+                                Ja = J_WF[axis, self.q_a_indices]
+                                foot_anchor_terms.append(a_ramp * cp.square(Ja @ dqa - delta))
                         continue
 
                     # strong SOFT pull toward the source plant position (<= 4 cm/frame/axis). A hard
@@ -704,6 +781,25 @@ class InteractionMeshRetargeter:
                         delta = float(np.clip(a_val - p_now[axis], -0.04, 0.04))
                         Ja = J_WF[axis, self.q_a_indices]
                         foot_anchor_terms.append(cp.square(Ja @ dqa - delta))
+
+            # Soft foot-orientation ENGAGEMENT DAMPING: position pins alone let the ankle snap to a
+            # constraint-consistent attitude the frame a window binds. Penalize the foot's per-frame
+            # rotation (relative to the previous FRAME, so SQP iterations cannot compound it) through
+            # the first ~0.2 s of each window -- the foot still reaches whatever attitude its own
+            # geometry settles into, just smoothly. See _foot_orient_damp; swing/mid-stance untouched.
+            if apply_foot_lock and self.foot_orient_weight > 0 and not init_t:
+                for side in ("left", "right"):
+                    w_damp = self._foot_orient_damp(side, frame_idx)
+                    if w_damp <= 0:
+                        continue
+                    bid = mujoco.mj_name2id(
+                        self.robot_model, mujoco.mjtObj.mjOBJ_BODY, f"{side}_ankle_roll_link"
+                    )
+                    R_last = self._body_rot(q_t_last, bid)
+                    R_now = self._body_rot(q, bid)  # also restores FK(q) for the Jacobian below
+                    Jr = self._calc_rot_jacobian(bid)[:, self.q_a_indices]
+                    accrued = Rotation.from_matrix(R_now @ R_last.T).as_rotvec()
+                    foot_orient_terms.append(w_damp * cp.sum_squares(Jr @ dqa + accrued))
 
         # Non-penetration constraints. Sources can START inside geometry (that is the defect being
         # cleaned); demanding full escape in one linearized step is jointly infeasible, so cap the
@@ -743,6 +839,10 @@ class InteractionMeshRetargeter:
         if apply_foot_lock and foot_anchor_terms:
             obj_terms.append(200.0 * cp.sum(cp.hstack(foot_anchor_terms)))
 
+        # stance foot-orientation engagement (see foot-lock block): ramped, slew-limited, soft
+        if foot_orient_terms:
+            obj_terms.append(self.foot_orient_weight * cp.sum(cp.hstack(foot_orient_terms)))
+
         # nominal tracking for selected indices
         if (w_nominal_tracking > 0) and (q_a_nominal is not None):
             idx = np.array(self.track_nominal_indices, dtype=int)
@@ -753,6 +853,13 @@ class InteractionMeshRetargeter:
         # Q_diag cost
         Qd = np.asarray(self.Q_diag, dtype=float).reshape(-1)
         obj_terms.append(cp.sum_squares(cp.multiply(np.sqrt(Qd), dqa + q_a_n_last)))
+
+        # Acceleration damping: penalize deviation from the constant-velocity extrapolation. Unlike the
+        # velocity term it costs nothing on smooth motion, so it suppresses 2-frame QP-tie flips only.
+        if np.any(self.accel_damp_weight) and (q_t_last2 is not None) and not init_t:
+            dqa_cv = 2 * q_t_last[self.q_a_indices] - q_t_last2[self.q_a_indices] - q_a_n_last
+            w_ad = np.broadcast_to(np.asarray(self.accel_damp_weight, dtype=float), (self.nq_a,))
+            obj_terms.append(cp.sum_squares(cp.multiply(np.sqrt(w_ad), dqa - dqa_cv)))
 
         # Smoothness cost
         dqa_smooth = q_t_last[self.q_a_indices] - q_a_n_last
@@ -765,6 +872,62 @@ class InteractionMeshRetargeter:
             else:
                 # if a full matrix was supplied, fall back to quad_form
                 obj_terms.append(cp.quad_form(dqa - dqa_smooth, Wsmooth))
+
+        # hcrl: JOINT-LIMIT BARRIER. The hard box above admits solutions pinned exactly AT a stop, and
+        # nothing costs that -- waist_pitch sits on its +0.52 stop in 54% of corpus frames. A pinned joint
+        # has zero control headroom downstream. This is a one-sided quadratic hinge that is exactly zero
+        # outside `margin` of a stop, so the interior of the range is undistorted.
+        if self.joint_limit_barrier_weight > 0 and self.joint_limit_barrier_margin > 0:
+            rows, m = self._barrier_rows_and_margins()
+            if rows.size:
+                q_new = dqa[rows] + q_a_n_last[rows]
+                over = cp.pos(q_new - (self.q_a_ub[rows] - m))
+                under = cp.pos((self.q_a_lb[rows] + m) - q_new)
+                obj_terms.append(
+                    self.joint_limit_barrier_weight * (cp.sum_squares(over) + cp.sum_squares(under))
+                )
+
+        # hcrl: PELVIS-TRACKING PRIOR. The interaction mesh is a DIFFERENTIAL (Laplacian) objective, so the
+        # absolute root pose is in its null space: the solver is free to lean the pelvis back and cancel it
+        # with waist pitch (measured corr -0.58, torso net upright). Anchoring the pelvis to the source
+        # removes that null space at its origin -- it is the primary fix for the waist saturation, and the
+        # barrier above is the guard.
+        if self.pelvis_track_weight > 0 and human_src_pts is not None:
+            k = robot_link_keys[self._pelvis_kp]
+            obj_terms.append(
+                self.pelvis_track_weight
+                * cp.sum_squares(J_OC_dict[k] @ dqa - (human_src_pts[self._pelvis_kp] - p_OC_dict[k]))
+            )
+
+        # hcrl: ARM REGULARIZER. Arms carry no contact in most clips, so the mesh leaves them
+        # under-determined and the solver parks them in whatever pose the null space lands on (the
+        # "awkward arm" defect -- same redundancy class as the waist, not a joint-limit problem: the
+        # elbow saturates in only 0.02% of frames). Pull all 6 arm keypoints toward the source.
+        if self.arm_reg_weight > 0 and human_src_pts is not None:
+            arm_terms = [
+                cp.sum_squares(J_OC_dict[robot_link_keys[i]] @ dqa - (human_src_pts[i] - p_OC_dict[robot_link_keys[i]]))
+                for i in self._arm_kps
+            ]
+            obj_terms.append(self.arm_reg_weight * cp.sum(cp.hstack(arm_terms)))
+
+        # hcrl: NEUTRAL-ANKLE PRIOR IN FREE SWING. Ankle pitch/roll are unconstrained mid-swing and drift
+        # onto their stops (roll is pinned in 35% of `edge` frames), so the foot lands pointed/inverted.
+        # Gated strictly OFF through the approach ramp and the engagement window, so it can never fight the
+        # attitude the foot settles into on contact -- that target was tried and measured to hurt
+        # (see _foot_orient_damp), and this prior deliberately does not reintroduce one.
+        if self.swing_ankle_weight > 0 and apply_foot_lock and not init_t:
+            for side in ("left", "right"):
+                key = f"{side}_ankle_roll_link"
+                free_swing = (
+                    not self._is_foot_locked_in_window(key, frame_idx)
+                    and self._foot_orient_damp(side, frame_idx) <= 0.0
+                    and self._foot_approach_anchor(key, frame_idx)[1] is None
+                )
+                rows_a = self._ankle_rows[side]
+                if free_swing and rows_a.size:
+                    obj_terms.append(
+                        self.swing_ankle_weight * cp.sum_squares(dqa[rows_a] + q_a_n_last[rows_a])
+                    )
 
         problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints)
 
@@ -797,6 +960,62 @@ class InteractionMeshRetargeter:
 
         return q_star, cost
 
+    def _foot_orient_damp(self, side: str, frame_idx: int) -> float:
+        """Engagement-phase angular-rate damping weight in [0, 1]: cosine ramp-in over the last 3
+        swing frames BEFORE a window (descent toe-down rotation finishes before contact, not after),
+        full for the first 4 stance frames (the constraint-activation snap), cosine fade to 0 by
+        frame 9. No attitude TARGET exists -- flat and source-implied targets both measurably fight
+        the attitude the G1's own geometry settles into (longer foot than the scaled human); damping
+        only limits the RATE of reaching it. Mid/late stance and the rest of swing are untouched."""
+        for w in self._foot_lock_windows.get(side, ()):
+            start, end = w[0], w[1]
+            if start - 3 <= frame_idx < start:
+                return 0.5 * (1 - np.cos(np.pi * (frame_idx - start + 4) / 3))  # 0.25 / 0.75 / 1.0 into t0
+            if start <= frame_idx <= min(end, start + 9):
+                k = frame_idx - start
+                return 1.0 if k <= 3 else 0.5 * (1 + np.cos(np.pi * (k - 3) / 6))
+        return 0.0
+
+    def _foot_approach_anchor(self, foot_link_key: str, frame_idx: int) -> tuple[float, tuple | None]:
+        """(cosine ramp in [0, 1], anchor xyz) over the last 4 swing frames before a stance window:
+        anticipatory approach shaping so the foot ARRIVES at its known anchor and the post-contact
+        settle ~ 0 (descents land toe-first with 3-4 cm arrival error otherwise). The ramp is tiny 4
+        frames out and ~0.9 the frame before contact -- it bends only the final approach, not the arc."""
+        key_lower = foot_link_key.lower()
+        side = "left" if "left" in key_lower else ("right" if "right" in key_lower else None)
+        if side is None:
+            return 0.0, None
+        for w in self._foot_lock_windows.get(side, ()):
+            start = w[0]
+            if start - 4 <= frame_idx < start and w[2] is not None:
+                p = (frame_idx - (start - 5)) / 4.0  # reaches full anchor weight the frame before contact
+                return 0.5 * (1 - np.cos(np.pi * p)), (w[2], w[3], w[4])
+        return 0.0, None
+
+    def _body_rot(self, q: np.ndarray, body_id: int) -> np.ndarray:
+        """World rotation matrix of a body at configuration q (leaves robot_data at q's FK)."""
+        self.robot_data.qpos[:] = q
+        mujoco.mj_forward(self.robot_model, self.robot_data)
+        return self.robot_data.xmat[body_id].reshape(3, 3).copy()
+
+    def _calc_rot_jacobian(self, body_id: int) -> np.ndarray:
+        """Rotational Jacobian (3 x nq) at the CURRENT robot_data FK state: w_world = Jr @ qdot."""
+        Jp = np.zeros((3, self.robot_model.nv), dtype=np.float64, order="C")
+        Jr = np.zeros((3, self.robot_model.nv), dtype=np.float64, order="C")
+        p = self.robot_data.xpos[body_id].astype(np.float64).reshape(3, 1)
+        mujoco.mj_jac(self.robot_model, self.robot_data, Jp, Jr, p, int(body_id))
+        return Jr @ self._build_transform_qdot_to_qvel_fast()
+
+    def _foot_step_cap(self, frame_idx: int, foot_link_key: str) -> float:
+        """Backtrack-level toe step cap for this frame/foot: 0.075 default ~= natural swing peak;
+        a per-clip (T, 2) override raises it through real flight phases (jumps) so the cap cannot
+        flatten the motion, while stance-adjacent frames keep the tight default."""
+        if self.foot_step_max_seq is None:
+            return 0.075
+        k = 1 if "right" in foot_link_key.lower() else 0
+        t = min(max(frame_idx, 0), len(self.foot_step_max_seq) - 1)
+        return float(self.foot_step_max_seq[t, k])
+
     def _is_foot_locked_in_window(self, foot_link_key: str, frame_idx: int) -> bool:
         """Check whether a foot link is locked by configured frame windows."""
         key_lower = foot_link_key.lower()
@@ -816,7 +1035,7 @@ class InteractionMeshRetargeter:
         side = "left" if "left" in key_lower else ("right" if "right" in key_lower else None)
         if side is None:
             return None
-        for start, end, x, y, z in self._foot_lock_windows.get(side, ()):
+        for start, end, x, y, z, *_ in self._foot_lock_windows.get(side, ()):
             if start <= frame_idx <= end:
                 return (x, y, z if z is not None else float(self.foot_lock.z_floor))
         return None
@@ -889,6 +1108,8 @@ class InteractionMeshRetargeter:
         init_t: bool = False,
         n_iter: int = 10,
         frame_idx: int = 0,
+        q_t_last2: np.ndarray | None = None,
+        human_src_pts: np.ndarray | None = None,
     ):
         """Iterate the solver for multiple iterations."""
         last_cost = np.inf
@@ -906,6 +1127,8 @@ class InteractionMeshRetargeter:
                 w_nominal_tracking=w_nominal_tracking,
                 init_t=init_t,
                 frame_idx=frame_idx,
+                q_t_last2=q_t_last2,
+                human_src_pts=human_src_pts,
             )
             if np.isclose(cost, last_cost):
                 break
@@ -916,25 +1139,25 @@ class InteractionMeshRetargeter:
         # whole frame update (nonlinear FK check) until no toe moves more than FOOT_STEP_MAX from the
         # previous frame -- physically impossible foot motion cannot leave this function.
         if self.foot_lock.enable and not init_t:
-            FOOT_STEP_MAX = 0.075
 
-            def _max_toe_step(q_test: np.ndarray) -> float:
+            def _step_excess(q_test: np.ndarray) -> float:
+                """Max (toe step - per-foot cap); > 0 means some toe exceeds its cap."""
                 _, p_now, _ = self._calc_manipulator_jacobians(q_test, links=self.foot_links, obj_frame=False)
                 _, p_prev, _ = self._calc_manipulator_jacobians(q_t_last, links=self.foot_links, obj_frame=False)
-                steps = [
-                    float(np.linalg.norm(p_now[k] - p_prev[k]))
+                ex = [
+                    float(np.linalg.norm(p_now[k] - p_prev[k])) - self._foot_step_cap(frame_idx, k)
                     for k in p_now
                     if (not self.foot_lock.lock_links_substr) or self.foot_lock.lock_links_substr in k
                 ]
-                return max(steps) if steps else 0.0
+                return max(ex) if ex else 0.0
 
-            if _max_toe_step(q_n) > FOOT_STEP_MAX:
+            if _step_excess(q_n) > 0:
                 lo, hi = 0.0, 1.0
                 for _ in range(12):
                     mid = 0.5 * (lo + hi)
                     q_mid = q_t_last + mid * (q_n - q_t_last)
                     q_mid[3:7] /= np.linalg.norm(q_mid[3:7])  # keep the base quat unit under blending
-                    if _max_toe_step(q_mid) > FOOT_STEP_MAX:
+                    if _step_excess(q_mid) > 0:
                         hi = mid
                     else:
                         lo = mid
