@@ -16,7 +16,11 @@ from scipy.spatial.transform import Rotation  # type: ignore[import-untyped]
 from tqdm import tqdm
 from viser.extras import ViserUrdf  # type: ignore[import-not-found]
 
+from holosoma_retargeting.config_types.data_type import root_keypoint
 from holosoma_retargeting.config_types.retargeter import FootLockConfig, SelfCollisionConfig
+
+# Substrings identifying arm keypoints in a joint mapping, across source formats.
+_ARM_KEYPOINT_PARTS = ("shoulder", "elbow", "wrist", "hand")
 
 # Add src to path for direct execution
 src_path = Path(__file__).parent.parent / "src"
@@ -107,6 +111,18 @@ class InteractionMeshRetargeter:
         self.smooth_weight = 0.2
         self.accel_damp_weight = 0.0  # acceleration damping: zero-cost at constant velocity (anti-oscillation)
         self.foot_step_max_seq = None  # optional (T, 2) [left, right] per-frame toe-step caps (flight phases)
+        # Teleporting feet are excluded by bounding Cartesian toe speed, which depends on neither
+        # terrain nor contact detection -- so it is not tied to foot_lock.
+        self.teleport_guard = True
+        # Source sole-plane normals (T, 2, 3) for [left, right]; without them nothing pins foot
+        # pitch/roll, because the joint mapping gives each foot only an ankle and a toe point.
+        self.sole_normal_seq = None
+        self.sole_normal_weight = 0.0
+        # Source sole ground heights (T, 2); flattening alone lifts the sole, so stance also needs a height.
+        self.sole_height_seq = None
+        self.sole_height_weight = 0.0
+        self.sole_planted_height = 0.03
+        self._sole_body_id_cache: dict[str, list[int]] = {}
         self.foot_orient_weight = 0.0  # stance-engagement foot angular-rate damping (0 = off; _foot_orient_damp)
         self.joint_limit_barrier_weight = 0.0  # one-sided hinge inside `margin` of an actuated stop
         self.joint_limit_barrier_margin = 0.0  # rad, absolute cap; 0 disables the barrier
@@ -178,12 +194,15 @@ class InteractionMeshRetargeter:
         # quaternion whose MANUAL_LB/UB box is +-1), which must never see the joint-limit barrier.
         self._actuated_rows = np.flatnonzero(self.q_a_indices >= 7)
         self._ankle_rows = {
-            side: self._resolve_joint_rows((f"{side}_ankle_pitch_joint", f"{side}_ankle_roll_joint"))
-            for side in ("left", "right")
+            side: self._resolve_joint_rows(tuple(joints))
+            for side, joints in self.task_constants.ANKLE_JOINTS.items()
         }
-        # G1FK keypoint order: 0 = pelvis, 9-14 = both arms (shoulder_roll, elbow, hand)
-        self._pelvis_kp = 0
-        self._arm_kps = (9, 10, 11, 12, 13, 14)
+        # Keypoint priors index the joint mapping, whose order and names vary by source format.
+        match_names = list(self.laplacian_match_links.keys())
+        self._pelvis_kp = match_names.index(root_keypoint(match_names))
+        self._arm_kps = tuple(
+            i for i, name in enumerate(match_names) if any(part in name.lower() for part in _ARM_KEYPOINT_PARTS)
+        )
 
         # Prevent too much waist twist
         self.Q_diag = np.zeros(self.nq_a) * 1e-3
@@ -220,10 +239,14 @@ class InteractionMeshRetargeter:
         return rows, margins
 
     def _resolve_joint_rows(self, joint_names: tuple[str, ...]) -> np.ndarray:
-        """dqa rows for named joints (qpos address -> position within q_a_indices); [] if absent."""
+        """dqa rows for named joints (qpos address -> position within q_a_indices); absent names are skipped."""
         rows = []
         for name in joint_names:
-            adr = self.robot_model.jnt_qposadr[self.robot_model.joint(name).id]
+            try:
+                joint = self.robot_model.joint(name)
+            except KeyError:
+                continue
+            adr = self.robot_model.jnt_qposadr[joint.id]
             hit = np.flatnonzero(self.q_a_indices == adr)
             if hit.size:
                 rows.append(int(hit[0]))
@@ -709,7 +732,7 @@ class InteractionMeshRetargeter:
             # HARD Cartesian foot velocity cap (every frame, both feet): constraint releases and mesh
             # pulls must never teleport a foot -- physically impossible foot motion is excluded in the
             # QP itself rather than depending on contact detection being right. Cap per 30 fps frame.
-            if self.foot_lock.enable and not init_t:
+            if self.teleport_guard and not init_t:
                 _, p_last_all, _ = self._calc_manipulator_jacobians(q_t_last, links=self.foot_links, obj_frame=False)
                 for key, J_WF in J_WF_dict.items():
                     if self.foot_lock.lock_links_substr and self.foot_lock.lock_links_substr not in key:
@@ -887,6 +910,48 @@ class InteractionMeshRetargeter:
                     self.joint_limit_barrier_weight * (cp.sum_squares(over) + cp.sum_squares(under))
                 )
 
+        # hcrl: SOLE-ORIENTATION MATCHING. Two mapped points per foot (an ankle and a toe) define a
+        # line, so the sole's pitch and roll cost the mesh objective nothing and it settles toe-down.
+        # Rotate the robot sole toward the source's own sole plane; the residual is projected off the
+        # normal so foot YAW stays free (the human's yaw is not a target).
+        if self.sole_normal_weight > 0 and self.sole_normal_seq is not None and not init_t:
+            t = min(max(frame_idx, 0), len(self.sole_normal_seq) - 1)
+            for k, side in enumerate(("left", "right")):
+                bid = mujoco.mj_name2id(
+                    self.robot_model, mujoco.mjtObj.mjOBJ_BODY, self.task_constants.FOOT_LINKS[side]
+                )
+                if bid < 0:
+                    continue
+                normal_now = self._body_rot(q, bid)[:, 2]  # sole plane normal is the foot body's local +z
+                target = np.asarray(self.sole_normal_seq[t, k], dtype=np.float64)
+                axis = np.cross(normal_now, target)
+                sin_a = float(np.linalg.norm(axis))
+                if sin_a < 1e-8:
+                    continue
+                error = axis / sin_a * float(np.arctan2(sin_a, float(np.dot(normal_now, target))))
+                keep_tilt = np.eye(3) - np.outer(normal_now, normal_now)
+                Jr = self._calc_rot_jacobian(bid)[:, self.q_a_indices]
+                obj_terms.append(self.sole_normal_weight * cp.sum_squares(keep_tilt @ (Jr @ dqa - error)))
+
+                # While the source sole is on the ground, put the robot's sole there too. The sole
+                # plane sits SOLE_OFFSET below the foot body, so the body's target height follows it.
+                # While the source sole is on the ground, put the robot's sole there too. Orientation
+                # alone LIFTS the foot: rotating a toe-down sole flat raises its lowest contact point.
+                if self.sole_height_weight > 0 and self.sole_height_seq is not None:
+                    target_height = float(self.sole_height_seq[t, k])
+                    if target_height < self.sole_planted_height:
+                        sole_now = min(self.robot_data.xpos[b][2] for b in self._sole_body_ids(side))
+                        Jp = self._calc_pos_jacobian(bid)[:, self.q_a_indices]
+                        # One-sided: penalize HOVERING above the source's sole height, never being
+                        # below it. A symmetric pull settles at a compromise well above the floor,
+                        # and driving through the target relies on the non-penetration constraint
+                        # catching it -- which is what put feet through the ground. Here that
+                        # constraint is the floor and this term only ever pushes down onto it.
+                        obj_terms.append(
+                            self.sole_height_weight
+                            * cp.square(cp.pos(Jp[2] @ dqa + (sole_now - target_height)))
+                        )
+
         # hcrl: PELVIS-TRACKING PRIOR. The interaction mesh is a DIFFERENTIAL (Laplacian) objective, so the
         # absolute root pose is in its null space: the solver is free to lean the pelvis back and cancel it
         # with waist pitch (measured corr -0.58, torso net upright). Anchoring the pelvis to the source
@@ -997,6 +1062,23 @@ class InteractionMeshRetargeter:
         self.robot_data.qpos[:] = q
         mujoco.mj_forward(self.robot_model, self.robot_data)
         return self.robot_data.xmat[body_id].reshape(3, 3).copy()
+
+    def _sole_body_ids(self, side: str) -> list[int]:
+        """Body ids of one foot's sole spheres, resolved once the robot model exists."""
+        if side not in self._sole_body_id_cache:
+            self._sole_body_id_cache[side] = [
+                mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, name)
+                for name in self.task_constants.SOLE_LINKS[side]
+            ]
+        return self._sole_body_id_cache[side]
+
+    def _calc_pos_jacobian(self, body_id: int) -> np.ndarray:
+        """Positional Jacobian (3 x nq) at the CURRENT robot_data FK state: v_world = Jp @ qdot."""
+        Jp = np.zeros((3, self.robot_model.nv), dtype=np.float64, order="C")
+        Jr = np.zeros((3, self.robot_model.nv), dtype=np.float64, order="C")
+        p = self.robot_data.xpos[body_id].astype(np.float64).reshape(3, 1)
+        mujoco.mj_jac(self.robot_model, self.robot_data, Jp, Jr, p, int(body_id))
+        return Jp @ self._build_transform_qdot_to_qvel_fast()
 
     def _calc_rot_jacobian(self, body_id: int) -> np.ndarray:
         """Rotational Jacobian (3 x nq) at the CURRENT robot_data FK state: w_world = Jr @ qdot."""
@@ -1138,7 +1220,7 @@ class InteractionMeshRetargeter:
         # and linearization error across SQP iterations lets the true step overshoot. Backtrack the
         # whole frame update (nonlinear FK check) until no toe moves more than FOOT_STEP_MAX from the
         # previous frame -- physically impossible foot motion cannot leave this function.
-        if self.foot_lock.enable and not init_t:
+        if self.teleport_guard and not init_t:
 
             def _step_excess(q_test: np.ndarray) -> float:
                 """Max (toe step - per-foot cap); > 0 means some toe exceeds its cap."""

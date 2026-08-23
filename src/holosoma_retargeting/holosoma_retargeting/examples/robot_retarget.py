@@ -76,6 +76,10 @@ _OBJECT_SCALE_AUGMENTED = np.array([1.0, 1.0, 1.2])
 _OBJECT_SCALE_NORMAL = np.array([1.0, 1.0, 1.0])
 _AUGMENTATION_TRANSLATION = np.array([0.2, 0.0, 0.0])
 
+# Toe-step cap floor (m/frame at 30 fps) and how far the source's own toe speed may be exceeded.
+DEFAULT_TOE_STEP_CAP = 0.075
+TOE_STEP_CAP_SOURCE_SCALE = 1.2
+
 
 # Type aliases
 TaskType = Literal["robot_only", "object_interaction", "climbing"]
@@ -773,6 +777,14 @@ def main(cfg: RetargetingConfig) -> None:
     # Extract foot sticking sequences. A precomputed override (hcrl/stance_windows.py: position+height
     # rule against the terrain) takes priority -- the velocity heuristic finds nothing on IK-retargeted
     # sources whose stance feet skate faster than 1 cm/s.
+    # Per-clip toe-step cap from the SOURCE: motion that is genuinely fast (a kick, a jump) must not be
+    # flattened by a fixed cap, while anything faster than the source itself is a teleport.
+    _toe_idx = [retargeter.demo_joints.index(t) for t in toe_names]
+    _steps = np.zeros((len(human_joints), 2))
+    _steps[1:] = np.linalg.norm(np.diff(human_joints[:, _toe_idx], axis=0), axis=2)
+    _steps = np.maximum(_steps, np.roll(_steps, 1, axis=0))  # 2-frame max: tolerate phase offsets
+    toe_step_cap = np.maximum(DEFAULT_TOE_STEP_CAP, TOE_STEP_CAP_SOURCE_SCALE * _steps)
+
     sticking_file = data_path / task_name / f"{task_name}_foot_sticking.npz" if task_type == "climbing" else None
     if sticking_file is not None and sticking_file.exists():
         _stick = np.load(sticking_file, allow_pickle=True)
@@ -785,25 +797,38 @@ def main(cfg: RetargetingConfig) -> None:
         logger.info("Loaded foot sticking override: %s (L %.0f%% / R %.0f%%)",
                     sticking_file.name, 100 * _mask[:, 0].mean(), 100 * _mask[:, 1].mean())
 
-        # hcrl: per-clip toe-step cap from the SOURCE -- real flight phases (jumps) legitimately exceed
-        # the 7.5 cm/frame default; cap at source x1.2 there, keep the tight default in/near stances.
-        _toe_idx = [retargeter.demo_joints.index(t) for t in toe_names]
-        _src_toes = human_joints[:, _toe_idx]
-        _steps = np.zeros((len(human_joints), 2))
-        _steps[1:] = np.linalg.norm(np.diff(_src_toes, axis=0), axis=2)
-        _steps = np.maximum(_steps, np.roll(_steps, 1, axis=0))  # 2-frame max: tolerate phase offsets
-        _cap = np.maximum(0.075, 1.2 * _steps)
+        # Stance frames get the tight default cap: a planted foot has no licence to move fast.
         for _side, _k in (("windows_left", 0), ("windows_right", 1)):
             for _win in _stick[_side]:
-                _s0, _s1 = max(int(_win[0]) - 1, 0), min(int(_win[1]) + 1, len(_cap) - 1)
-                _cap[_s0 : _s1 + 1, _k] = 0.075
-        retargeter.foot_step_max_seq = _cap
-        logger.info("Toe-step cap: default 0.075, per-clip max L %.3f / R %.3f m/frame",
-                    _cap[:, 0].max(), _cap[:, 1].max())
+                _s0, _s1 = max(int(_win[0]) - 1, 0), min(int(_win[1]) + 1, len(toe_step_cap) - 1)
+                toe_step_cap[_s0 : _s1 + 1, _k] = DEFAULT_TOE_STEP_CAP
     else:
         foot_sticking_sequences = extract_foot_sticking_sequence_velocity(
             human_joints, retargeter.demo_joints, toe_names
         )
+
+    retargeter.foot_step_max_seq = toe_step_cap
+    logger.info("Toe-step cap: default %.3f, per-clip max L %.3f / R %.3f m/frame",
+                DEFAULT_TOE_STEP_CAP, toe_step_cap[:, 0].max(), toe_step_cap[:, 1].max())
+
+    # Source sole planes, when the format supplies them: the joint mapping pins only an ankle and a
+    # toe per foot, which leaves pitch/roll free and lets the sole settle toe-down. Scaling and
+    # translation upstream preserve normal directions, so these need no transform.
+    sole_normal_file = data_path / f"{task_name}.npz"
+    if sole_normal_file.exists():
+        with np.load(str(sole_normal_file)) as source_npz:
+            sole_normal = source_npz.get("sole_normal")
+            source_npz_height = source_npz.get("sole_height")
+        if sole_normal is not None:
+            retargeter.sole_normal_seq = sole_normal
+            retargeter.sole_normal_weight = _envf("HCRL_SOLE_W", 5.0)
+            # heights are source-scale like the keypoints, so they need the same smpl_scale; the
+            # clamp keeps a noisy source frame from ever commanding the sole below the floor
+            retargeter.sole_height_seq = np.maximum(source_npz_height * smpl_scale, 0.0)
+            retargeter.sole_height_weight = _envf("HCRL_SOLE_Z_W", 2000.0)
+            tilt = np.degrees(np.arccos(np.clip(sole_normal[..., 2], -1.0, 1.0)))
+            logger.info("Sole-orientation matching: weight %.1f, source tilt median %.1f deg",
+                        retargeter.sole_normal_weight, float(np.median(tilt)))
 
     # Task-specific foot sticking adjustments
     if task_type == "object_interaction":
