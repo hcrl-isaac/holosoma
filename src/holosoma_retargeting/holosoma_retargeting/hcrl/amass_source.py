@@ -37,6 +37,12 @@ SHARED_POSE_DIM = 22 * 3
 # the floor. Each clip is FK'd on the model its fit used, named by the npz's own `gender` field.
 SMPL_MODEL_FILES = {"male": "SMPL_MALE.pkl", "female": "SMPL_FEMALE.pkl", "neutral": "SMPL_NEUTRAL.pkl"}
 
+# AMASS is not uniform across sub-datasets: the SMPL-X releases spell the frame rate differently and some
+# store the pose split by body part instead of one array. Both differences are silent if unhandled -- a
+# missed frame rate plays a 120 fps clip as 30, and the retarget comes out in slow motion.
+FRAME_RATE_KEYS = ("mocap_framerate", "mocap_frame_rate", "frame_rate", "fps")
+SPLIT_POSE_KEYS = ("root_orient", "pose_body")
+
 
 def _resample(values: np.ndarray, source_fps: float, target_fps: float) -> np.ndarray:
     """Nearest-frame resample along axis 0. Nearest, not interpolated: SMPL poses are axis-angle, and
@@ -67,6 +73,24 @@ def load_models(model_dir: Path) -> dict[str, dict]:
     if "neutral" not in models:
         raise FileNotFoundError(f"{model_dir} has no {SMPL_MODEL_FILES['neutral']} to fall back on")
     return models
+
+
+def _source_poses(raw: dict) -> np.ndarray:
+    """The root+body pose block, from either a single ``poses`` array or split per-part fields."""
+    if "poses" in raw:
+        return np.asarray(raw["poses"], dtype=np.float64)
+    if all(key in raw for key in SPLIT_POSE_KEYS):
+        parts = [np.asarray(raw[key], dtype=np.float64) for key in SPLIT_POSE_KEYS]
+        return np.concatenate([p.reshape(p.shape[0], -1) for p in parts], axis=-1)
+    raise ValueError(f"no pose data: expected 'poses' or {SPLIT_POSE_KEYS}, found {sorted(raw)}")
+
+
+def _frame_rate(raw: dict) -> float:
+    """The clip's source frame rate. Raises rather than guessing: a wrong rate is silent slow motion."""
+    for key in FRAME_RATE_KEYS:
+        if key in raw:
+            return float(np.asarray(raw[key]).item())
+    raise ValueError(f"no frame rate: expected one of {FRAME_RATE_KEYS}, found {sorted(raw)}")
 
 
 def _body_pose(poses: np.ndarray) -> np.ndarray:
@@ -128,8 +152,8 @@ def convert_clip(
     raw = np.load(clip_path, allow_pickle=True)
     gender = _gender(raw)
     model, clip_soles = models.get(gender, models["neutral"]), soles.get(gender, soles["neutral"])
-    source_fps = float(raw["mocap_framerate"]) if "mocap_framerate" in raw else float(raw.get("fps", target_fps))
-    poses = _resample(_body_pose(np.asarray(raw["poses"], dtype=np.float64)), source_fps, target_fps)
+    source_fps = _frame_rate(raw)
+    poses = _resample(_body_pose(_source_poses(raw)), source_fps, target_fps)
     trans = _resample(np.asarray(raw["trans"], dtype=np.float64), source_fps, target_fps)
 
     joints = smpl_joint_positions(model, poses, trans)
@@ -185,7 +209,7 @@ def main() -> None:
     clips = sorted(p for p in args.clip_root.rglob("*.npz") if not p.name.startswith("shape"))
     print(f"[amass] {len(clips)} candidate clips under {args.clip_root}")
 
-    written, skipped = [], 0
+    written, skipped, rates = [], 0, {}
     for clip in clips:
         # flatten the corpus's dataset/subject/sequence tree into one task name
         name = "_".join(clip.relative_to(args.clip_root).with_suffix("").parts)
@@ -198,12 +222,14 @@ def main() -> None:
         if meta["frames"] < args.min_frames:
             skipped += 1
             continue
+        rates[meta["source_fps"]] = rates.get(meta["source_fps"], 0) + 1
         written.append(meta)
 
     (args.out_dir / "clips.txt").write_text("\n".join(m["name"] for m in written) + "\n")
     flipped = [m["name"] for m in written if m["chirality"] * CHIRALITY_REFERENCE_SIGN < 0]
     genders = {g: sum(m["gender"] == g for m in written) for g in SMPL_MODEL_FILES}
     print(f"[amass] wrote {len(written)} clips, skipped {skipped}; by gender {genders}")
+    print(f"[amass] source frame rates seen: {dict(sorted(rates.items()))}")
     if flipped:
         print(f"\033[91m[amass] {len(flipped)} clips are MIRRORED (left/right swapped): {flipped[:5]}\033[0m")
 
