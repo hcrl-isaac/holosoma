@@ -32,6 +32,11 @@ from holosoma_retargeting.hcrl.smpl_fk import (
 SMPL_POSE_DIM = 24 * 3
 SHARED_POSE_DIM = 22 * 3
 
+# AMASS ships only gendered fits ("SMPL+H G") for the full corpus, so FK-ing every clip through one body
+# would mis-proportion half of them -- and the sole heights this adapter derives are what pins the feet to
+# the floor. Each clip is FK'd on the model its fit used, named by the npz's own `gender` field.
+SMPL_MODEL_FILES = {"male": "SMPL_MALE.pkl", "female": "SMPL_FEMALE.pkl", "neutral": "SMPL_NEUTRAL.pkl"}
+
 
 def _resample(values: np.ndarray, source_fps: float, target_fps: float) -> np.ndarray:
     """Nearest-frame resample along axis 0. Nearest, not interpolated: SMPL poses are axis-angle, and
@@ -41,6 +46,27 @@ def _resample(values: np.ndarray, source_fps: float, target_fps: float) -> np.nd
     count = max(1, round(values.shape[0] * target_fps / source_fps))
     idx = np.clip(np.round(np.arange(count) * source_fps / target_fps).astype(int), 0, values.shape[0] - 1)
     return values[idx]
+
+
+def _gender(raw: dict) -> str:
+    """The clip's fitted gender, normalized. Stored as bytes, a 0-d array, or a plain string."""
+    value = raw.get("gender", "neutral")
+    value = value.item() if isinstance(value, np.ndarray) else value
+    value = value.decode() if isinstance(value, bytes) else str(value)
+    value = value.strip().lower()
+    return value if value in SMPL_MODEL_FILES else "neutral"
+
+
+def load_models(model_dir: Path) -> dict[str, dict]:
+    """Load the male/female/neutral SMPL models a gendered corpus needs, keyed by gender."""
+    models = {}
+    for gender, filename in SMPL_MODEL_FILES.items():
+        path = model_dir / filename
+        if path.exists():
+            models[gender] = load_smpl_model(path)
+    if "neutral" not in models:
+        raise FileNotFoundError(f"{model_dir} has no {SMPL_MODEL_FILES['neutral']} to fall back on")
+    return models
 
 
 def _body_pose(poses: np.ndarray) -> np.ndarray:
@@ -79,29 +105,36 @@ def chirality(joints: np.ndarray) -> float:
 
 
 def convert_clip(
-    model: dict, clip_path: Path, out_dir: Path, soles: dict[str, np.ndarray], target_fps: float, name: str
+    models: dict[str, dict],
+    soles: dict[str, dict[str, np.ndarray]],
+    clip_path: Path,
+    out_dir: Path,
+    target_fps: float,
+    name: str,
 ) -> dict:
     """Convert one AMASS/OMOMO npz into a retargeting source npz plus a metadata sidecar.
 
     Args:
-        model: Output of :func:`load_smpl_model`.
+        models: Gender-keyed SMPL models from :func:`load_models`.
+        soles: Gender-keyed sole vertex indices from :func:`sole_vertices`.
         clip_path: Path to the source ``.npz`` (needs ``poses`` and ``trans``).
         out_dir: Directory to write ``<name>.npz`` and ``<name>.meta.json`` into.
-        soles: Per-side sole vertex indices from :func:`sole_vertices`.
         target_fps: Rate every clip is resampled to.
         name: Output stem; also the ``--task-name`` the retargeter is called with.
 
     Returns:
-        Metadata dict for this clip (name, source, frames, fps, ground offset, chirality).
+        Metadata dict for this clip (name, source, gender, frames, fps, ground offset, chirality).
     """
     raw = np.load(clip_path, allow_pickle=True)
+    gender = _gender(raw)
+    model, clip_soles = models.get(gender, models["neutral"]), soles.get(gender, soles["neutral"])
     source_fps = float(raw["mocap_framerate"]) if "mocap_framerate" in raw else float(raw.get("fps", target_fps))
     poses = _resample(_body_pose(np.asarray(raw["poses"], dtype=np.float64)), source_fps, target_fps)
     trans = _resample(np.asarray(raw["trans"], dtype=np.float64), source_fps, target_fps)
 
     joints = smpl_joint_positions(model, poses, trans)
     joints = to_z_up(joints)[:, :SMPL_BODY_JOINTS]
-    sole_points = [to_z_up(skin_vertices(model, poses, trans, soles[side])) for side in ("left", "right")]
+    sole_points = [to_z_up(skin_vertices(model, poses, trans, clip_soles[side])) for side in ("left", "right")]
     sole_normal = np.stack([plane_normals(p) for p in sole_points], axis=1)
     sole_height = np.stack([p[..., 2].min(axis=1) for p in sole_points], axis=1)
 
@@ -121,6 +154,7 @@ def convert_clip(
     meta = {
         "name": name,
         "source": str(clip_path),
+        "gender": gender,
         "frames": int(joints.shape[0]),
         "source_fps": source_fps,
         "fps": target_fps,
@@ -134,14 +168,20 @@ def convert_clip(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Convert AMASS/OMOMO npz clips into retargeting sources.")
     parser.add_argument("--clip-root", type=Path, required=True, help="Root dir searched recursively for *.npz.")
-    parser.add_argument("--smpl-model", type=Path, required=True, help="Path to SMPL_MALE.pkl.")
+    parser.add_argument(
+        "--smpl-model-dir",
+        type=Path,
+        required=True,
+        help="Directory holding SMPL_{MALE,FEMALE,NEUTRAL}.pkl; the clip's own gender field picks one.",
+    )
     parser.add_argument("--out-dir", type=Path, required=True, help="Output directory for source npz files.")
     parser.add_argument("--fps", type=float, default=30.0, help="Rate every clip is resampled to.")
     parser.add_argument("--min-frames", type=int, default=30, help="Skip clips shorter than this after resampling.")
     args = parser.parse_args()
 
-    model = load_smpl_model(args.smpl_model)
-    soles = sole_vertices(model)
+    models = load_models(args.smpl_model_dir)
+    soles = {gender: sole_vertices(model) for gender, model in models.items()}
+    print(f"[amass] body models: {sorted(models)}")
     clips = sorted(p for p in args.clip_root.rglob("*.npz") if not p.name.startswith("shape"))
     print(f"[amass] {len(clips)} candidate clips under {args.clip_root}")
 
@@ -150,7 +190,7 @@ def main() -> None:
         # flatten the corpus's dataset/subject/sequence tree into one task name
         name = "_".join(clip.relative_to(args.clip_root).with_suffix("").parts)
         try:
-            meta = convert_clip(model, clip, args.out_dir, soles, args.fps, name)
+            meta = convert_clip(models, soles, clip, args.out_dir, args.fps, name)
         except (KeyError, ValueError) as err:
             print(f"[amass] SKIP {name}: {err}")
             skipped += 1
@@ -162,7 +202,8 @@ def main() -> None:
 
     (args.out_dir / "clips.txt").write_text("\n".join(m["name"] for m in written) + "\n")
     flipped = [m["name"] for m in written if m["chirality"] * CHIRALITY_REFERENCE_SIGN < 0]
-    print(f"[amass] wrote {len(written)} clips, skipped {skipped}")
+    genders = {g: sum(m["gender"] == g for m in written) for g in SMPL_MODEL_FILES}
+    print(f"[amass] wrote {len(written)} clips, skipped {skipped}; by gender {genders}")
     if flipped:
         print(f"\033[91m[amass] {len(flipped)} clips are MIRRORED (left/right swapped): {flipped[:5]}\033[0m")
 
