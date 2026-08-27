@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Iterator
 from pathlib import Path
 
+import joblib
 import numpy as np
 
 from holosoma_retargeting.hcrl.smpl_fk import (
@@ -109,6 +111,23 @@ def _body_pose(poses: np.ndarray) -> np.ndarray:
 CHIRALITY_REFERENCE_SIGN = 1.0
 
 
+def up_axis(joints: np.ndarray) -> int:
+    """Index of the axis the body stands along, from the mean head-minus-feet vector.
+
+    SMPL-native sources (AMASS) are y-up and need rotating; OMOMO stores z-up already. Rotating a z-up
+    source lays the person on their side, and NO handedness or height check catches it -- a rotation
+    preserves chirality, and the "ground" offset just re-centres the wreckage.
+
+    Args:
+        joints: SMPL body joint positions, shape ``(frames, >=16, 3)``.
+
+    Returns:
+        The axis index (2 for z-up), i.e. where head-minus-feet is largest and positive.
+    """
+    head_minus_feet = (joints[:, 15] - joints[:, [10, 11]].mean(axis=1)).mean(axis=0)
+    return int(np.argmax(head_minus_feet))
+
+
 def chirality(joints: np.ndarray) -> float:
     """Median signed volume of (hip axis, foot-forward axis, spine axis) over the clip.
 
@@ -131,34 +150,40 @@ def chirality(joints: np.ndarray) -> float:
 def convert_clip(
     models: dict[str, dict],
     soles: dict[str, dict[str, np.ndarray]],
-    clip_path: Path,
+    raw: dict,
     out_dir: Path,
     target_fps: float,
     name: str,
+    source_fps: float | None = None,
 ) -> dict:
     """Convert one AMASS/OMOMO npz into a retargeting source npz plus a metadata sidecar.
 
     Args:
         models: Gender-keyed SMPL models from :func:`load_models`.
         soles: Gender-keyed sole vertex indices from :func:`sole_vertices`.
-        clip_path: Path to the source ``.npz`` (needs ``poses`` and ``trans``).
+        raw: Mapping with ``trans`` and either ``poses`` or ``root_orient``/``pose_body``.
         out_dir: Directory to write ``<name>.npz`` and ``<name>.meta.json`` into.
         target_fps: Rate every clip is resampled to.
         name: Output stem; also the ``--task-name`` the retargeter is called with.
+        source_fps: Rate override for corpora that carry none (OMOMO); ``None`` reads it from ``raw``.
 
     Returns:
-        Metadata dict for this clip (name, source, gender, frames, fps, ground offset, chirality).
+        Metadata dict for this clip (name, gender, frames, fps, ground offset, chirality).
     """
-    raw = np.load(clip_path, allow_pickle=True)
     gender = _gender(raw)
     model, clip_soles = models.get(gender, models["neutral"]), soles.get(gender, soles["neutral"])
-    source_fps = _frame_rate(raw)
+    source_fps = _frame_rate(raw) if source_fps is None else source_fps
     poses = _resample(_body_pose(_source_poses(raw)), source_fps, target_fps)
     trans = _resample(np.asarray(raw["trans"], dtype=np.float64), source_fps, target_fps)
 
     joints = smpl_joint_positions(model, poses, trans)
-    joints = to_z_up(joints)[:, :SMPL_BODY_JOINTS]
-    sole_points = [to_z_up(skin_vertices(model, poses, trans, clip_soles[side])) for side in ("left", "right")]
+    # rotate only a y-up source; see up_axis
+    rotate = up_axis(joints) != 2
+    orient = to_z_up if rotate else (lambda p: p)
+    joints = orient(joints)[:, :SMPL_BODY_JOINTS]
+    if up_axis(joints) != 2:
+        raise ValueError(f"body does not stand along z after conversion (up axis {up_axis(joints)})")
+    sole_points = [orient(skin_vertices(model, poses, trans, clip_soles[side])) for side in ("left", "right")]
     sole_normal = np.stack([plane_normals(p) for p in sole_points], axis=1)
     sole_height = np.stack([p[..., 2].min(axis=1) for p in sole_points], axis=1)
 
@@ -177,10 +202,10 @@ def convert_clip(
     )
     meta = {
         "name": name,
-        "source": str(clip_path),
         "gender": gender,
         "frames": int(joints.shape[0]),
         "source_fps": source_fps,
+        "rotated_to_z_up": rotate,
         "fps": target_fps,
         "ground": ground,
         "chirality": chirality(joints),
@@ -189,9 +214,28 @@ def convert_clip(
     return meta
 
 
+def iter_clips(root: Path) -> Iterator[tuple[str, dict]]:
+    """Yield ``(name, raw)`` for every sequence under ``root``.
+
+    Handles both corpus shapes: an AMASS tree of per-sequence ``.npz`` (the dataset/subject/sequence
+    path becomes the name), or an OMOMO ``.p`` joblib dict of sequences keyed by index.
+    """
+    if root.is_file():
+        for seq in joblib.load(root).values():
+            yield str(seq["seq_name"]), seq
+        return
+    for path in sorted(p for p in root.rglob("*.npz") if not p.name.startswith("shape")):
+        yield "_".join(path.relative_to(root).with_suffix("").parts), np.load(path, allow_pickle=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Convert AMASS/OMOMO npz clips into retargeting sources.")
-    parser.add_argument("--clip-root", type=Path, required=True, help="Root dir searched recursively for *.npz.")
+    parser.add_argument(
+        "--clip-root",
+        type=Path,
+        required=True,
+        help="AMASS root dir searched recursively for *.npz, or an OMOMO *.p sequence file.",
+    )
     parser.add_argument(
         "--smpl-model-dir",
         type=Path,
@@ -201,20 +245,22 @@ def main() -> None:
     parser.add_argument("--out-dir", type=Path, required=True, help="Output directory for source npz files.")
     parser.add_argument("--fps", type=float, default=30.0, help="Rate every clip is resampled to.")
     parser.add_argument("--min-frames", type=int, default=30, help="Skip clips shorter than this after resampling.")
+    parser.add_argument(
+        "--assume-fps",
+        type=float,
+        default=None,
+        help="Source rate for corpora that store none (OMOMO is 30). Only set it when you know the rate: "
+        "a wrong value retargets the whole corpus at the wrong speed.",
+    )
     args = parser.parse_args()
 
     models = load_models(args.smpl_model_dir)
     soles = {gender: sole_vertices(model) for gender, model in models.items()}
     print(f"[amass] body models: {sorted(models)}")
-    clips = sorted(p for p in args.clip_root.rglob("*.npz") if not p.name.startswith("shape"))
-    print(f"[amass] {len(clips)} candidate clips under {args.clip_root}")
-
     written, skipped, rates = [], 0, {}
-    for clip in clips:
-        # flatten the corpus's dataset/subject/sequence tree into one task name
-        name = "_".join(clip.relative_to(args.clip_root).with_suffix("").parts)
+    for name, raw in iter_clips(args.clip_root):
         try:
-            meta = convert_clip(models, soles, clip, args.out_dir, args.fps, name)
+            meta = convert_clip(models, soles, raw, args.out_dir, args.fps, name, source_fps=args.assume_fps)
         except (KeyError, ValueError) as err:
             print(f"[amass] SKIP {name}: {err}")
             skipped += 1
@@ -230,6 +276,8 @@ def main() -> None:
     genders = {g: sum(m["gender"] == g for m in written) for g in SMPL_MODEL_FILES}
     print(f"[amass] wrote {len(written)} clips, skipped {skipped}; by gender {genders}")
     print(f"[amass] source frame rates seen: {dict(sorted(rates.items()))}")
+    rotated = sum(m["rotated_to_z_up"] for m in written)
+    print(f"[amass] rotated y-up -> z-up: {rotated}/{len(written)} clips (AMASS expects all, OMOMO none)")
     if flipped:
         print(f"\033[91m[amass] {len(flipped)} clips are MIRRORED (left/right swapped): {flipped[:5]}\033[0m")
 
