@@ -112,20 +112,49 @@ CHIRALITY_REFERENCE_SIGN = 1.0
 
 
 def up_axis(joints: np.ndarray) -> int:
-    """Index of the axis the body stands along, from the mean head-minus-feet vector.
+    """Axis the body stands along in this clip, from the mean head-minus-feet vector.
 
-    SMPL-native sources (AMASS) are y-up and need rotating; OMOMO stores z-up already. Rotating a z-up
-    source lays the person on their side, and NO handedness or height check catches it -- a rotation
-    preserves chirality, and the "ground" offset just re-centres the wreckage.
+    This measures POSTURE, not the source frame: a lying or crawling clip reads horizontal. Use it only
+    through :func:`corpus_up_axis`, which takes the majority over many clips.
 
     Args:
         joints: SMPL body joint positions, shape ``(frames, >=16, 3)``.
 
     Returns:
-        The axis index (2 for z-up), i.e. where head-minus-feet is largest and positive.
+        The axis index where head-minus-feet is largest.
     """
     head_minus_feet = (joints[:, 15] - joints[:, [10, 11]].mean(axis=1)).mean(axis=0)
     return int(np.argmax(head_minus_feet))
+
+
+def corpus_up_axis(models: dict, samples: list, min_agreement: float = 0.7) -> tuple[int, float]:
+    """The source frame's up-axis, by majority vote over sampled clips.
+
+    Decided ONCE per corpus and applied uniformly. A per-clip rule follows posture instead of the frame,
+    so it rotates every lying/crawling clip into nonsense -- and neither the handedness check nor the
+    height check catches that, because a rotation preserves both.
+
+    Args:
+        models: Gender-keyed SMPL models.
+        samples: ``(gender, poses, trans)`` triples drawn from across the corpus.
+        min_agreement: Fraction of samples that must agree before the vote is trusted.
+
+    Returns:
+        ``(axis, agreement)``; axis 2 means the corpus is already z-up.
+
+    Raises:
+        ValueError: The vote is too split to call, i.e. the corpus is not in one consistent frame.
+    """
+    votes: dict[int, int] = {}
+    for gender, poses, trans in samples:
+        joints = smpl_joint_positions(models.get(gender, models["neutral"]), poses, trans)
+        axis = up_axis(joints)
+        votes[axis] = votes.get(axis, 0) + 1
+    axis = max(votes, key=lambda k: votes[k])
+    agreement = votes[axis] / sum(votes.values())
+    if agreement < min_agreement:
+        raise ValueError(f"up-axis vote is inconclusive ({votes}); the corpus is not in one frame")
+    return axis, agreement
 
 
 def chirality(joints: np.ndarray) -> float:
@@ -154,6 +183,7 @@ def convert_clip(
     out_dir: Path,
     target_fps: float,
     name: str,
+    rotate_to_z_up: bool,
     source_fps: float | None = None,
 ) -> dict:
     """Convert one AMASS/OMOMO npz into a retargeting source npz plus a metadata sidecar.
@@ -165,6 +195,7 @@ def convert_clip(
         out_dir: Directory to write ``<name>.npz`` and ``<name>.meta.json`` into.
         target_fps: Rate every clip is resampled to.
         name: Output stem; also the ``--task-name`` the retargeter is called with.
+        rotate_to_z_up: Whether this corpus is y-up, from :func:`corpus_up_axis`. Uniform per corpus.
         source_fps: Rate override for corpora that carry none (OMOMO); ``None`` reads it from ``raw``.
 
     Returns:
@@ -176,13 +207,8 @@ def convert_clip(
     poses = _resample(_body_pose(_source_poses(raw)), source_fps, target_fps)
     trans = _resample(np.asarray(raw["trans"], dtype=np.float64), source_fps, target_fps)
 
-    joints = smpl_joint_positions(model, poses, trans)
-    # rotate only a y-up source; see up_axis
-    rotate = up_axis(joints) != 2
-    orient = to_z_up if rotate else (lambda p: p)
-    joints = orient(joints)[:, :SMPL_BODY_JOINTS]
-    if up_axis(joints) != 2:
-        raise ValueError(f"body does not stand along z after conversion (up axis {up_axis(joints)})")
+    orient = to_z_up if rotate_to_z_up else (lambda p: p)
+    joints = orient(smpl_joint_positions(model, poses, trans))[:, :SMPL_BODY_JOINTS]
     sole_points = [orient(skin_vertices(model, poses, trans, clip_soles[side])) for side in ("left", "right")]
     sole_normal = np.stack([plane_normals(p) for p in sole_points], axis=1)
     sole_height = np.stack([p[..., 2].min(axis=1) for p in sole_points], axis=1)
@@ -205,7 +231,7 @@ def convert_clip(
         "gender": gender,
         "frames": int(joints.shape[0]),
         "source_fps": source_fps,
-        "rotated_to_z_up": rotate,
+        "rotated_to_z_up": rotate_to_z_up,
         "fps": target_fps,
         "ground": ground,
         "chirality": chirality(joints),
@@ -228,6 +254,18 @@ def iter_clips(root: Path) -> Iterator[tuple[str, dict]]:
         yield "_".join(path.relative_to(root).with_suffix("").parts), np.load(path, allow_pickle=True)
 
 
+def _vote_sample(raw: dict) -> tuple | None:
+    """A ``(gender, poses, trans)`` triple for the up-axis vote, or None if the clip is unreadable."""
+    try:
+        return (
+            _gender(raw),
+            _body_pose(_source_poses(raw))[:200],
+            np.asarray(raw["trans"], dtype=np.float64)[:200],
+        )
+    except (KeyError, ValueError):
+        return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Convert AMASS/OMOMO npz clips into retargeting sources.")
     parser.add_argument(
@@ -246,6 +284,13 @@ def main() -> None:
     parser.add_argument("--fps", type=float, default=30.0, help="Rate every clip is resampled to.")
     parser.add_argument("--min-frames", type=int, default=30, help="Skip clips shorter than this after resampling.")
     parser.add_argument(
+        "--up-axis",
+        choices=("auto", "y", "z"),
+        default="auto",
+        help="Source frame's up-axis. 'auto' votes over sampled clips, which is per-CORPUS: a per-clip "
+        "rule follows posture and mangles lying/crawling motions.",
+    )
+    parser.add_argument(
         "--assume-fps",
         type=float,
         default=None,
@@ -257,10 +302,32 @@ def main() -> None:
     models = load_models(args.smpl_model_dir)
     soles = {gender: sole_vertices(model) for gender, model in models.items()}
     print(f"[amass] body models: {sorted(models)}")
+    clips = list(iter_clips(args.clip_root))
+    print(f"[amass] {len(clips)} clips found")
+
+    if args.up_axis == "auto":
+        stride = max(1, len(clips) // 64)
+        samples = [t for _, raw in clips[::stride][:64] if (t := _vote_sample(raw)) is not None]
+        axis, agreement = corpus_up_axis(models, samples)
+        print(f"[amass] corpus up-axis: {'xyz'[axis]} ({agreement:.0%} of {len(samples)} sampled clips)")
+    else:
+        axis, agreement = ("xyz".index(args.up_axis), 1.0)
+        print(f"[amass] corpus up-axis: {args.up_axis} (forced)")
+    rotate = axis != 2
+
     written, skipped, rates = [], 0, {}
-    for name, raw in iter_clips(args.clip_root):
+    for name, raw in clips:
         try:
-            meta = convert_clip(models, soles, raw, args.out_dir, args.fps, name, source_fps=args.assume_fps)
+            meta = convert_clip(
+                models,
+                soles,
+                raw,
+                args.out_dir,
+                args.fps,
+                name,
+                rotate_to_z_up=rotate,
+                source_fps=args.assume_fps,
+            )
         except (KeyError, ValueError) as err:
             print(f"[amass] SKIP {name}: {err}")
             skipped += 1
@@ -276,8 +343,7 @@ def main() -> None:
     genders = {g: sum(m["gender"] == g for m in written) for g in SMPL_MODEL_FILES}
     print(f"[amass] wrote {len(written)} clips, skipped {skipped}; by gender {genders}")
     print(f"[amass] source frame rates seen: {dict(sorted(rates.items()))}")
-    rotated = sum(m["rotated_to_z_up"] for m in written)
-    print(f"[amass] rotated y-up -> z-up: {rotated}/{len(written)} clips (AMASS expects all, OMOMO none)")
+    print(f"[amass] rotated y-up -> z-up: {'yes' if rotate else 'no'} (uniform across the corpus)")
     if flipped:
         print(f"\033[91m[amass] {len(flipped)} clips are MIRRORED (left/right swapped): {flipped[:5]}\033[0m")
 
