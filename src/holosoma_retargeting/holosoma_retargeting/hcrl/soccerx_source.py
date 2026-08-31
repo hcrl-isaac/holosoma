@@ -13,8 +13,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from holosoma_retargeting.hcrl.ball_contact import BALL_RADIUS_M
 from holosoma_retargeting.hcrl.smpl_fk import (
     SMPL_BODY_JOINTS,
+    foot_vertices,
     load_smpl_model,
     plane_normals,
     skin_vertices,
@@ -24,7 +26,9 @@ from holosoma_retargeting.hcrl.smpl_fk import (
 )
 
 
-def convert_clip(model: dict, clip_path: Path, out_dir: Path, soles: dict[str, np.ndarray]) -> dict:
+def convert_clip(
+    model: dict, clip_path: Path, out_dir: Path, soles: dict[str, np.ndarray], feet: dict[str, np.ndarray]
+) -> dict:
     """Convert one Soccer-X clip into a retargeting source npz plus a metadata sidecar.
 
     Args:
@@ -32,6 +36,7 @@ def convert_clip(model: dict, clip_path: Path, out_dir: Path, soles: dict[str, n
         clip_path: Path to a Soccer-X ``.pt`` clip.
         out_dir: Directory to write ``<stem>.npz`` and ``<stem>.meta.json`` into.
         soles: Per-side sole vertex indices from :func:`sole_vertices`.
+        feet: Per-side whole-foot vertex indices from :func:`foot_vertices`.
 
     Returns:
         Metadata dict for this clip (name, label, frames, ground offset).
@@ -57,6 +62,13 @@ def convert_clip(model: dict, clip_path: Path, out_dir: Path, soles: dict[str, n
     # the joint-derived ground a planted sole reads about -24 mm and would be driven into the floor.
     sole_height -= float(np.median(np.min(sole_height, axis=1)))
 
+    # The human's own foot-to-ball clearance is what the robot has to reproduce in ABSOLUTE terms --
+    # the ball does not shrink with the player, so the retargeter cannot infer it from scaled keypoints.
+    foot_points = [to_z_up(skin_vertices(model, poses, trans, feet[side])) for side in ("left", "right")]
+    ball_gap = np.stack(
+        [np.linalg.norm(p - ball[:, None], axis=2).min(axis=1) - BALL_RADIUS_M for p in foot_points], axis=1
+    )
+
     name = clip_path.stem
     out_dir.mkdir(parents=True, exist_ok=True)
     np.savez(
@@ -77,7 +89,12 @@ def convert_clip(model: dict, clip_path: Path, out_dir: Path, soles: dict[str, n
         "fps": 30,
         "ground_offset": ground,
     }
-    np.savez(out_dir / f"{name}.ball.npz", soccer_pos=ball.astype(np.float32), soccer_ori=clip["soccer_ori"].numpy())
+    np.savez(
+        out_dir / f"{name}.ball.npz",
+        soccer_pos=ball.astype(np.float32),
+        soccer_ori=clip["soccer_ori"].numpy(),
+        ball_gap=ball_gap.astype(np.float32),
+    )
     (out_dir / f"{name}.meta.json").write_text(json.dumps(meta))
     return meta
 
@@ -92,11 +109,11 @@ def main() -> None:
     args = parser.parse_args()
 
     model = load_smpl_model(args.smpl_model)
-    soles = sole_vertices(model)
+    soles, feet = sole_vertices(model), foot_vertices(model)
     clips = sorted(args.clip_root.glob("Part*/*.pt"))
     metas = []
     for i, clip in enumerate(clips):
-        meta = convert_clip(model, clip, args.out_dir, soles)
+        meta = convert_clip(model, clip, args.out_dir, soles, feet)
         if meta["frames"] < args.min_frames:
             for suffix in (".npz", ".ball.npz", ".meta.json"):
                 (args.out_dir / f"{meta['name']}{suffix}").unlink()

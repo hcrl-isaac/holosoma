@@ -26,6 +26,7 @@ from holosoma_retargeting.config_types.retargeter import RetargeterConfig  # noq
 from holosoma_retargeting.config_types.retargeting import RetargetingConfig  # noqa: E402
 from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
 from holosoma_retargeting.config_types.task import TaskConfig  # noqa: E402
+from holosoma_retargeting.hcrl import ball_contact  # noqa: E402
 from holosoma_retargeting.src.interaction_mesh_retargeter import (  # noqa: E402
     InteractionMeshRetargeter,  # type: ignore[import-not-found]
 )
@@ -953,6 +954,33 @@ def main(cfg: RetargetingConfig) -> None:
             tilt = np.degrees(np.arccos(np.clip(sole_normal[..., 2], -1.0, 1.0)))
             logger.info("Sole-orientation matching: weight %.1f, source tilt median %.1f deg",
                         retargeter.sole_normal_weight, float(np.median(tilt)))
+
+    # A ball keeps its real radius while the human shrinks to robot size, so scaled contact geometry
+    # ends up inside it. Ball centres come from the source's own sidecar and ride along to the output.
+    ball_file = data_path / f"{task_name}.ball.npz"
+    if ball_file.exists():
+        with np.load(str(ball_file)) as ball_npz:
+            ball_pos = ball_npz["soccer_pos"].astype(np.float64)
+            ball_gap = ball_npz.get("ball_gap")
+        if len(ball_pos) == len(human_joints):
+            retargeter.ball_radius = ball_contact.BALL_RADIUS_M
+            retargeter.ball_seq = ball_contact.to_solver_frame(ball_pos, smpl_scale, retargeter.ball_radius)
+            retargeter.ball_foot_points = ball_contact.foot_surface_points(
+                retargeter.robot_model, constants.FOOT_LINKS
+            )
+            retargeter.ball_weight = _envf("HCRL_BALL_W", 2000.0)
+            if ball_gap is not None:
+                retargeter.ball_clearance_seq = ball_contact.target_clearance(
+                    ball_gap.astype(np.float64), _envf("HCRL_BALL_BAND", ball_contact.BALL_CLEARANCE_BAND_M)
+                )
+            tracked = np.isfinite(retargeter.ball_seq).all(axis=1)
+            logger.info("Ball clearance: weight %.0f, radius %.3f m, source clearance %s, %.0f%% of frames tracked",
+                        retargeter.ball_weight, retargeter.ball_radius,
+                        "yes" if ball_gap is not None else "MISSING (non-penetration only)",
+                        100 * float(tracked.mean()))
+        else:
+            logger.warning("Ball sidecar has %d frames for %d source frames; skipping the ball term",
+                           len(ball_pos), len(human_joints))
 
     # Task-specific foot sticking adjustments
     if task_type == "object_interaction":
