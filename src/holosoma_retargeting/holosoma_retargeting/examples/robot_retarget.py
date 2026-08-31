@@ -162,7 +162,8 @@ def validate_config(cfg: RetargetingConfig) -> None:
     # Task-specific format requirements
     if cfg.task_type == "climbing" and cfg.data_format not in (None, "mocap", "g1fk"):
         raise ValueError("Climbing task requires 'mocap' data format")
-    if cfg.task_type == "object_interaction" and cfg.data_format not in (None, "smplh"):
+    # smplx is the 22-joint body layout our OMOMO sources use; smplh assumes the 52-joint set
+    if cfg.task_type == "object_interaction" and cfg.data_format not in (None, "smplh", "smplx"):
         raise ValueError("Object interaction requires 'smplh' data format")
     # robot_only accepts any format in the registry (already validated above)
 
@@ -182,6 +183,9 @@ def create_ground_points(x_range: tuple[float, float], y_range: tuple[float, flo
     y = np.linspace(y_range[0], y_range[1], size)
     X, Y = np.meshgrid(x, y)
     return np.stack([X.flatten(), Y.flatten(), np.zeros_like(X.flatten())], axis=1)
+
+
+_root_quat_track = None
 
 
 def load_motion_data(
@@ -211,6 +215,7 @@ def load_motion_data(
     Raises:
         FileNotFoundError: If required data files are not found
     """
+    global _root_quat_track
     logger.info("Loading motion data for task: %s, format: %s", task_name, data_format)
 
     if task_type == "robot_only":
@@ -264,12 +269,22 @@ def load_motion_data(
         object_poses = np.tile(np.array([[1, 0, 0, 0, 0, 0, 0]]), (num_frames, 1))
 
     elif task_type == "object_interaction":
+        npz_path = data_path / f"{task_name}.npz"
         pt_path = data_path / f"{task_name}.pt"
-        if not pt_path.exists():
-            raise FileNotFoundError(f"InterMimic data file not found: {pt_path}")
-
-        human_joints, object_poses = load_intermimic_data(str(pt_path))
-        smpl_scale = calculate_scale_factor(task_name, constants.ROBOT_HEIGHT)
+        if npz_path.exists():
+            # OMOMO: the source npz carries the object pose track alongside the human joints, already in
+            # the same frame (see hcrl/omomo_objects.py).
+            human_data = np.load(str(npz_path), allow_pickle=True)
+            human_joints = human_data["global_joint_positions"]
+            object_poses = human_data["object_poses"]
+            smpl_scale = constants.ROBOT_HEIGHT / float(human_data["height"])
+            if "root_quat" in human_data.files:
+                _root_quat_track = np.asarray(human_data["root_quat"], dtype=float)
+        elif pt_path.exists():
+            human_joints, object_poses = load_intermimic_data(str(pt_path))
+            smpl_scale = calculate_scale_factor(task_name, constants.ROBOT_HEIGHT)
+        else:
+            raise FileNotFoundError(f"No object-interaction data for {task_name} at {npz_path} or {pt_path}")
 
     elif task_type == "climbing":
         task_dir = data_path / task_name
@@ -707,12 +722,98 @@ def main(cfg: RetargetingConfig) -> None:
             logger.info("Foot z-lock windows: L %d / R %d", len(_sw["windows_left"]), len(_sw["windows_right"]))
 
     retargeter = InteractionMeshRetargeter(**retargeter_kwargs)
+    # env var so the batch driver can toggle it without threading a flag through the cfg
+    retargeter.limb_retarget = bool(getattr(cfg, "limb_retarget", False)) or os.environ.get(
+        "HOLOSOMA_LIMB_RETARGET", ""
+    ).lower() in ("1", "true", "yes")
     logger.info("Retargeter created")
 
     # hcrl: anti-oscillation damping when stance windows are active -- with the toe anchored and
     # sole-sphere XY stuck, the lateral-lean null space is near-tied and flips at 15 Hz (ankle-roll
     # rocking, mm-scale root wobble). Ankle roll gets velocity damping (stance roll velocity ~ 0);
     # everything else gets acceleration damping, which is free on smooth motion so it cannot drag.
+    # hcrl: acceleration damping is gated on foot_lock above, which only ever fires for climbing clips,
+    # so ordinary retargets ran with accel_damp_weight=0 and snapped frame to frame. The term costs
+    # nothing at constant velocity, so applying it generally smooths the solve without dragging motion.
+    # hcrl: the root's quaternion rows (qpos 3..6) get the same scalar smoothing as a knee, so the
+    # torso can swing frame to frame while the joints look smooth. Boost just those rows.
+    _rootw = _envf("HCRL_ROOT_SMOOTH_W", 8.0)
+    if _rootw > 0 and retargeter.q_a_init_idx == -7 and np.isscalar(retargeter.smooth_weight):
+        _sv = np.full(retargeter.nq_a, float(retargeter.smooth_weight))
+        _sv[3:7] = _rootw
+        retargeter.smooth_weight = _sv
+        logger.info("Root-orientation smoothing weight: %.1f (joints %.2f)", _rootw, float(_sv[7]))
+
+    _rr = _envf("HCRL_ROOT_RATE_W", 0.0)  # measured: no improvement, off by default
+    if _rr > 0 and _root_quat_track is not None:
+        retargeter.root_rate_weight = _rr
+        retargeter.root_quat_track = _root_quat_track
+        logger.info("Root angular-rate prior: w=%.1f over %d frames", _rr, len(_root_quat_track))
+
+    _jaw = _envf("HCRL_JOINT_ANGLE_W", 5.0)
+    if _jaw > 0:
+        from holosoma_retargeting.hcrl.source_angles import t1_joint_angle_targets
+
+        retargeter.joint_angle_weight = _jaw
+        retargeter.joint_angle_targets = t1_joint_angle_targets(human_joints)
+        _m = {k: float(np.abs(v).mean()) for k, v in retargeter.joint_angle_targets.items()}
+        logger.info("Joint-angle tracking w=%.1f, source |angle| means: %s", _jaw,
+                    {k: round(v, 2) for k, v in _m.items()})
+
+    # debug: record the mapped source points the solver actually optimizes against, so an overlay
+    # shows the real targets rather than a reconstruction of them
+    _dump = os.environ.get("HCRL_DUMP_TARGETS", "")
+    if _dump:
+        retargeter._dump_targets = []
+        logger.info("Dumping solver targets to %s", _dump)
+
+    # convergence knobs: is the residual under-convergence (helped by more/larger steps) or the cost's
+    # own optimum (unchanged by them, meaning the term weights are what to fix)?
+    _ni = int(_envf("HCRL_N_ITER", 0))
+    if _ni > 0:
+        retargeter.solve_n_iter = _ni
+    _ss = _envf("HCRL_STEP_SIZE", 0.0)
+    if _ss > 0:
+        retargeter.step_size = _ss
+    logger.info("Solve: n_iter=%s step_size=%.2f", _ni or "default", retargeter.step_size)
+
+    retargeter.keypoint_track_weight = _envf("HCRL_KP_W", 0.0)
+    _lw = os.environ.get("HCRL_LAP_W", "")
+    if _lw != "":
+        retargeter.laplacian_weights = float(_lw)
+    retargeter.debug_terms = os.environ.get("HCRL_DEBUG_TERMS", "") in ("1", "true")
+
+    _ad = os.environ.get("HOLOSOMA_ACCEL_DAMP", "3.0")
+    _sw_env = os.environ.get("HOLOSOMA_SMOOTH_WEIGHT", "")
+    if not retargeter.foot_lock.enable and float(_ad) > 0:
+        retargeter.accel_damp_weight = float(_ad)
+        if _sw_env:
+            retargeter.smooth_weight = float(_sw_env)
+        logger.info(
+            "Temporal smoothing: accel_damp=%.2f smooth=%s", retargeter.accel_damp_weight, retargeter.smooth_weight
+        )
+
+    # hcrl: the redundancy priors below are NOT foot-lock specific -- they were gated behind it, so only
+    # climbing clips ever got them and every other retarget rode its joint stops with the arm and pelvis
+    # parked wherever the null space landed. Applied generally now, still env-overridable.
+    retargeter.joint_limit_barrier_weight = _envf("HCRL_JL_W", 50.0)
+    retargeter.joint_limit_barrier_margin = _envf("HCRL_JL_MARGIN", 0.10)
+    retargeter.joint_limit_barrier_margin_frac = _envf("HCRL_JL_MARGIN_FRAC", 0.15)
+    _jl_joints = os.environ.get("HCRL_JL_JOINTS", "").strip()
+    retargeter.joint_limit_barrier_joints = tuple(_jl_joints.split(",")) if _jl_joints else None
+    retargeter.pelvis_track_weight = _envf("HCRL_PELVIS_W", 5.0)
+    retargeter.arm_reg_weight = _envf("HCRL_ARM_W", 2.0)
+    retargeter.swing_ankle_weight = _envf("HCRL_SWING_ANKLE_W", 0.5)
+    logger.info(
+        "hcrl priors: jl_w=%.1f margin=%.3f/%.2f pelvis=%.1f arm=%.1f swing_ankle=%.2f",
+        retargeter.joint_limit_barrier_weight,
+        retargeter.joint_limit_barrier_margin,
+        retargeter.joint_limit_barrier_margin_frac,
+        retargeter.pelvis_track_weight,
+        retargeter.arm_reg_weight,
+        retargeter.swing_ankle_weight,
+    )
+
     if retargeter.foot_lock.enable and retargeter.q_a_init_idx == -7:
         _w = np.full(retargeter.nq_a, float(retargeter.smooth_weight))
         for _jn in ("left_ankle_roll_joint", "right_ankle_roll_joint"):
@@ -728,15 +829,6 @@ def main(cfg: RetargetingConfig) -> None:
         # ankle_roll 35% in `edge`). Barrier keeps a margin; the pelvis/arm priors remove the null
         # spaces that made the solver WANT the stop in the first place. Env-overridable so the weight
         # ablation sweeps without editing code (HCRL_JL_W=0 HCRL_PELVIS_W=0 ... == the v1 corpus).
-        retargeter.joint_limit_barrier_weight = _envf("HCRL_JL_W", 50.0)
-        retargeter.joint_limit_barrier_margin = _envf("HCRL_JL_MARGIN", 0.10)  # rad, capped by _FRAC
-        retargeter.joint_limit_barrier_margin_frac = _envf("HCRL_JL_MARGIN_FRAC", 0.15)
-        # comma-separated joint names, or unset = every actuated joint
-        _jl_joints = os.environ.get("HCRL_JL_JOINTS", "").strip()
-        retargeter.joint_limit_barrier_joints = tuple(_jl_joints.split(",")) if _jl_joints else None
-        retargeter.pelvis_track_weight = _envf("HCRL_PELVIS_W", 5.0)
-        retargeter.arm_reg_weight = _envf("HCRL_ARM_W", 2.0)
-        retargeter.swing_ankle_weight = _envf("HCRL_SWING_ANKLE_W", 0.5)
         logger.info(
             "hcrl v3 priors: jl_w=%.1f margin=%.3f/%.2f pelvis=%.1f arm=%.1f swing_ankle=%.2f",
             retargeter.joint_limit_barrier_weight,
@@ -750,6 +842,38 @@ def main(cfg: RetargetingConfig) -> None:
     # Preprocess motion data
     if task_type == "robot_only":
         human_joints = preprocess_motion_data(human_joints, retargeter, toe_names, smpl_scale)
+
+    # hcrl: ball-contact radius constraint (Soccer-X). Needs the splined ball sidecar next to the source
+    # npz; transforms it into the SOLVE frame by recovering the z-shift empirically from the processed
+    # joints, then detects contact segments on the toe keypoints with hysteresis.
+    if os.environ.get("HCRL_BALL_CONSTRAINT", "") in ("1", "true"):
+        _bf = data_path / f"{cfg.task_name}.ball_smooth.npz"
+        if not _bf.exists():
+            _bf = data_path / f"{cfg.task_name}.ball.npz"
+        if _bf.exists():
+            _raw = np.load(str(data_path / f"{cfg.task_name}.npz"))
+            _raw_j = _raw["global_joint_positions"].astype(float)
+            _zshift = float(_raw_j[0, 0, 2] - human_joints[0, 0, 2] / smpl_scale)
+            _ball = np.load(str(_bf))["soccer_pos"].astype(float)
+            _ball[:, 2] -= _zshift
+            _ball = _ball * smpl_scale
+            _n = min(len(human_joints), len(_ball))
+            _segs = []
+            # J_OC_dict in the solver is keyed by SOURCE keypoint names, not robot links
+            for _side, _toe_j, _toe_link in (("L", 10, "L_Foot"), ("R", 11, "R_Foot")):
+                _d = np.linalg.norm(human_joints[:_n, _toe_j] - _ball[:_n], axis=1)
+                _enter, _exit = 0.16 * smpl_scale, 0.22 * smpl_scale
+                _in, _s0, _r0 = False, 0, 0.0
+                for _t in range(_n):
+                    if not _in and _d[_t] < _enter:
+                        _in, _s0, _r0 = True, _t, float(_d[_t])
+                    elif _in and (_d[_t] > _exit or _t == _n - 1):
+                        _segs.append((_toe_link, _s0, _t if _d[_t] > _exit else _t + 1, _r0))
+                        _in = False
+            retargeter.ball_track = _ball
+            retargeter.ball_contacts = tuple(_segs)
+            logger.info("Ball constraint: %d segment(s): %s", len(_segs),
+                        [(l.split("_")[0], a, b, round(r, 3)) for l, a, b, r in _segs])
     elif task_type in {"object_interaction", "climbing"}:
         human_joints, object_poses, object_moving_frame_idx = preprocess_motion_data(
             human_joints,
@@ -853,6 +977,9 @@ def main(cfg: RetargetingConfig) -> None:
         original=not cfg.augmentation,
         dest_res_path=dest_res_path,
     )
+    if os.environ.get("HCRL_DUMP_TARGETS", ""):
+        np.save(os.environ["HCRL_DUMP_TARGETS"], np.asarray(retargeter._dump_targets))
+        logger.info("Wrote %d target frames", len(retargeter._dump_targets))
     logger.info("Retargeting complete. Results saved to: %s", dest_res_path)
 
     if cfg.retargeter.debug:

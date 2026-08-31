@@ -131,6 +131,14 @@ class InteractionMeshRetargeter:
         self.joint_limit_barrier_joints = None  # optional (name, ...): barrier ONLY these joints
         self.pelvis_track_weight = 0.0  # source-pelvis position prior (kills the pelvis<->waist null space)
         self.arm_reg_weight = 0.0  # source-arm position prior (stops the solver parking a redundant arm)
+        self.root_rate_weight = 0.0  # match the SOURCE root angular rate (kills inferred-torso jitter)
+        self.joint_angle_weight = 0.0  # track SOURCE anatomical joint angles, not just keypoint positions
+        self.keypoint_track_weight = 0.0  # absolute position prior on EVERY mapped keypoint
+        self.ball_track = None  # (T, 3) ball positions in the SOLVE frame (scaled + shifted)
+        self.ball_contacts = ()  # tuples (toe_link_name, start, end, r0) in solve scale
+        self.ball_tolerance = 0.005  # m, slack either side of r0
+        self.joint_angle_targets = None  # {joint name: (T,) target angle in rad}
+        self.root_quat_track = None  # (T, 4) wxyz source root orientation, or None
         self.swing_ankle_weight = 0.0  # neutral-ankle prior while a foot is in free swing
         # Tolerance for foot sticking constraints in x, y.
         self.foot_sticking_tolerance = foot_sticking_tolerance
@@ -454,6 +462,43 @@ class InteractionMeshRetargeter:
             self.draw_keypoints(q, name=f"{group_name}_q", rgba=(0.0, 1.0, 0.0, 1.0))
             self.draw_keypoints(c, name=f"{group_name}_c", rgba=(1.0, 0.0, 0.0, 1.0))
 
+
+    def _apply_limb_retarget(self, human_joint_motions):
+        """Rescale the mapped source keypoints to the robot's own segment lengths.
+
+        A uniform height scale keeps human proportions, so on a robot with different proportions the
+        mapped targets are unreachable and the IK saturates joints spanning them. Rescaling per segment
+        keeps bone directions and gives the solver reachable targets. Off by default; enable with
+        ``limb_retarget=True``.
+
+        Args:
+            human_joint_motions: ``(T, J, 3)`` source joints.
+
+        Returns:
+            ``(T, J, 3)`` with the mapped keypoints rescaled; other joints untouched.
+        """
+        if not getattr(self, "limb_retarget", False):
+            return human_joint_motions
+        import mujoco as mj
+
+        from holosoma_retargeting.hcrl.limb_retarget import rescale_to_robot_limbs, robot_segment_lengths
+
+        if getattr(self, "_limb_cache", None) is None:
+            parent, length, rigid = robot_segment_lengths(
+                self.robot_model, self.robot_data, self.laplacian_match_links, mj
+            )
+            self._limb_cache = (parent, length, rigid)
+            span = ", ".join(
+                f"{k}:{v:.3f}{'' if rigid.get(k) else '(cap)'}" for k, v in sorted(length.items()) if v > 0
+            )
+            print(f"[limb-retarget] robot segments: {span}", flush=True)
+        parent, length, rigid = self._limb_cache
+        names = list(self.laplacian_match_links.keys())
+        out = human_joint_motions.copy()
+        kp = out[:, self.smplh_mapped_joint_indices]
+        out[:, self.smplh_mapped_joint_indices] = rescale_to_robot_limbs(kp, names, parent, length, rigid)
+        return out
+
     def retarget_motion(
         self,
         human_joint_motions,
@@ -483,6 +528,8 @@ class InteractionMeshRetargeter:
         Returns:
             tuple: (retargeted_motions, obj_pts_demo_list, obj_pts_list, tetrahedra)
         """
+        human_joint_motions = self._apply_limb_retarget(human_joint_motions)
+
         num_frames = human_joint_motions.shape[0]
         if q_nominal_list is not None:
             q_locked_list = q_nominal_list
@@ -508,6 +555,8 @@ class InteractionMeshRetargeter:
 
                 # Get human joint positions and create interaction mesh in object frame
                 human_mapped_joints = human_joint_motions[i, self.smplh_mapped_joint_indices]
+                if getattr(self, "_dump_targets", None) is not None:
+                    self._dump_targets.append(np.asarray(human_mapped_joints, dtype=np.float32).copy())
 
                 if self.object_name == "ground":
                     human_mapped_joints_in_object = human_mapped_joints
@@ -697,29 +746,33 @@ class InteractionMeshRetargeter:
         robot_pts_local = np.array([p_OC_dict[k] for k in robot_link_keys])
         vertices = np.vstack([robot_pts_local, obj_pts_local])  # (V x 3)
 
-        L = calculate_laplacian_matrix(vertices, adj_list)  # (V x V), EXPECT SPARSE OR SMALL
-        if not sp.issparse(L):
-            L = sp.csr_matrix(L)
-
-        Kron = sp.kron(L, sp.eye(3, format="csr"), format="csr")
-        J_L = Kron @ J_V
-
-        lap0 = L @ vertices
-        lap0_vec = lap0.reshape(-1)  # (3V,)
-        target_lap_vec = target_laplacian.reshape(-1)  # (3V,)
-
-        w_v = (self.laplacian_weights * np.ones(V)).astype(float)  # (V,)
-        sqrt_w3 = np.sqrt(np.repeat(w_v, 3))
+        use_lap = float(np.max(np.atleast_1d(self.laplacian_weights))) > 0.0
 
         # Decision variables
         dqa = cp.Variable(len(self.q_a_indices), name="dqa")
-        lap_var = cp.Variable(3 * V, name="laplacian")
 
         # Constraints list
         constraints = []
 
-        # Linear equality
-        constraints += [cp.Constant(J_L[:, self.q_a_indices]) @ dqa - lap_var == -lap0_vec]
+        if use_lap:
+            L = calculate_laplacian_matrix(vertices, adj_list)  # (V x V), EXPECT SPARSE OR SMALL
+            if not sp.issparse(L):
+                L = sp.csr_matrix(L)
+
+            Kron = sp.kron(L, sp.eye(3, format="csr"), format="csr")
+            J_L = Kron @ J_V
+
+            lap0 = L @ vertices
+            lap0_vec = lap0.reshape(-1)  # (3V,)
+            target_lap_vec = target_laplacian.reshape(-1)  # (3V,)
+
+            w_v = (self.laplacian_weights * np.ones(V)).astype(float)  # (V,)
+            sqrt_w3 = np.sqrt(np.repeat(w_v, 3))
+
+            lap_var = cp.Variable(3 * V, name="laplacian")
+
+            # Linear equality
+            constraints += [cp.Constant(J_L[:, self.q_a_indices]) @ dqa - lap_var == -lap0_vec]
 
         # Foot constraints (sticking + foot lock window Z pinning)
         apply_foot_sticking = (self.q_a_init_idx < 12) and self.activate_foot_sticking
@@ -855,46 +908,53 @@ class InteractionMeshRetargeter:
 
         # Objective
         obj_terms = []
+        term_labels = []
 
-        obj_terms.append(cp.sum_squares(cp.multiply(sqrt_w3, lap_var - target_lap_vec)))
+        def _add_term(label, expr):  # noqa: ANN001, ANN202
+            obj_terms.append(expr)
+            term_labels.append(label)
+
+
+        if use_lap:
+            _add_term("laplacian", cp.sum_squares(cp.multiply(sqrt_w3, lap_var - target_lap_vec)))
 
         # foot anchor pull (see foot-lock block): heavily weighted so stance feet land and stay planted
         if apply_foot_lock and foot_anchor_terms:
-            obj_terms.append(200.0 * cp.sum(cp.hstack(foot_anchor_terms)))
+            _add_term("foot_anchor", 200.0 * cp.sum(cp.hstack(foot_anchor_terms)))
 
         # stance foot-orientation engagement (see foot-lock block): ramped, slew-limited, soft
         if foot_orient_terms:
-            obj_terms.append(self.foot_orient_weight * cp.sum(cp.hstack(foot_orient_terms)))
+            _add_term("foot_orient", self.foot_orient_weight * cp.sum(cp.hstack(foot_orient_terms)))
 
         # nominal tracking for selected indices
         if (w_nominal_tracking > 0) and (q_a_nominal is not None):
             idx = np.array(self.track_nominal_indices, dtype=int)
             if idx.size > 0:
                 z = dqa[idx] - (q_a_nominal[idx] - q_a_n_last[idx])
-                obj_terms.append(w_nominal_tracking * cp.sum_squares(z))
+                _add_term("nominal", w_nominal_tracking * cp.sum_squares(z))
 
         # Q_diag cost
         Qd = np.asarray(self.Q_diag, dtype=float).reshape(-1)
-        obj_terms.append(cp.sum_squares(cp.multiply(np.sqrt(Qd), dqa + q_a_n_last)))
+        _add_term("posture_Qd", cp.sum_squares(cp.multiply(np.sqrt(Qd), dqa + q_a_n_last)))
 
         # Acceleration damping: penalize deviation from the constant-velocity extrapolation. Unlike the
         # velocity term it costs nothing on smooth motion, so it suppresses 2-frame QP-tie flips only.
         if np.any(self.accel_damp_weight) and (q_t_last2 is not None) and not init_t:
             dqa_cv = 2 * q_t_last[self.q_a_indices] - q_t_last2[self.q_a_indices] - q_a_n_last
             w_ad = np.broadcast_to(np.asarray(self.accel_damp_weight, dtype=float), (self.nq_a,))
-            obj_terms.append(cp.sum_squares(cp.multiply(np.sqrt(w_ad), dqa - dqa_cv)))
+            _add_term("accel_damp", cp.sum_squares(cp.multiply(np.sqrt(w_ad), dqa - dqa_cv)))
 
         # Smoothness cost
         dqa_smooth = q_t_last[self.q_a_indices] - q_a_n_last
         if np.isscalar(self.smooth_weight):
-            obj_terms.append(self.smooth_weight * cp.sum_squares(dqa - dqa_smooth))
+            _add_term("smooth_scalar", self.smooth_weight * cp.sum_squares(dqa - dqa_smooth))
         else:
             Wsmooth = np.asarray(self.smooth_weight, dtype=float)
             if Wsmooth.ndim == 1:
-                obj_terms.append(cp.sum_squares(cp.multiply(np.sqrt(Wsmooth), dqa - dqa_smooth)))
+                _add_term("smooth_vec", cp.sum_squares(cp.multiply(np.sqrt(Wsmooth), dqa - dqa_smooth)))
             else:
                 # if a full matrix was supplied, fall back to quad_form
-                obj_terms.append(cp.quad_form(dqa - dqa_smooth, Wsmooth))
+                _add_term("smooth_quad", cp.quad_form(dqa - dqa_smooth, Wsmooth))
 
         # hcrl: JOINT-LIMIT BARRIER. The hard box above admits solutions pinned exactly AT a stop, and
         # nothing costs that -- waist_pitch sits on its +0.52 stop in 54% of corpus frames. A pinned joint
@@ -906,7 +966,7 @@ class InteractionMeshRetargeter:
                 q_new = dqa[rows] + q_a_n_last[rows]
                 over = cp.pos(q_new - (self.q_a_ub[rows] - m))
                 under = cp.pos((self.q_a_lb[rows] + m) - q_new)
-                obj_terms.append(
+                _add_term("joint_limit_barrier", 
                     self.joint_limit_barrier_weight * (cp.sum_squares(over) + cp.sum_squares(under))
                 )
 
@@ -931,7 +991,7 @@ class InteractionMeshRetargeter:
                 error = axis / sin_a * float(np.arctan2(sin_a, float(np.dot(normal_now, target))))
                 keep_tilt = np.eye(3) - np.outer(normal_now, normal_now)
                 Jr = self._calc_rot_jacobian(bid)[:, self.q_a_indices]
-                obj_terms.append(self.sole_normal_weight * cp.sum_squares(keep_tilt @ (Jr @ dqa - error)))
+                _add_term("sole_normal", self.sole_normal_weight * cp.sum_squares(keep_tilt @ (Jr @ dqa - error)))
 
                 # While the source sole is on the ground, put the robot's sole there too. The sole
                 # plane sits SOLE_OFFSET below the foot body, so the body's target height follows it.
@@ -947,7 +1007,7 @@ class InteractionMeshRetargeter:
                         # and driving through the target relies on the non-penetration constraint
                         # catching it -- which is what put feet through the ground. Here that
                         # constraint is the floor and this term only ever pushes down onto it.
-                        obj_terms.append(
+                        _add_term("foot_approach", 
                             self.sole_height_weight
                             * cp.square(cp.pos(Jp[2] @ dqa + (sole_now - target_height)))
                         )
@@ -959,10 +1019,73 @@ class InteractionMeshRetargeter:
         # barrier above is the guard.
         if self.pelvis_track_weight > 0 and human_src_pts is not None:
             k = robot_link_keys[self._pelvis_kp]
-            obj_terms.append(
+            _add_term("pelvis_track", 
                 self.pelvis_track_weight
                 * cp.sum_squares(J_OC_dict[k] @ dqa - (human_src_pts[self._pelvis_kp] - p_OC_dict[k]))
             )
+
+        # hcrl: ROOT ANGULAR-RATE PRIOR. The source gives only joint POSITIONS, so torso orientation is
+        # inferred from a handful of points and comes out noisier than the motion it came from (measured
+        # 1.45x the source's per-frame rotation). Matching the source's rotation RATE -- not its absolute
+        # orientation, whose rest pose differs from the robot's -- removes that jitter.
+        if self.root_rate_weight > 0 and self.root_quat_track is not None and not init_t:
+            _t = min(max(frame_idx, 1), len(self.root_quat_track) - 1)
+            _q0, _q1 = self.root_quat_track[_t - 1], self.root_quat_track[_t]
+            if float(np.dot(_q0, _q1)) < 0.0:  # quaternion double cover
+                _q1 = -_q1
+            _dq_src = _q1 - _q0
+            _add_term("root_rate", self.root_rate_weight * cp.sum_squares(dqa[3:7] - _dq_src))
+
+        # hcrl: JOINT-ANGLE TRACKING. Everything else in this objective matches keypoint POSITIONS. On a
+        # robot whose proportions differ from the human's, position matching necessarily distorts the joint
+        # ANGLES -- which for expressive motion (dance) carry the content, while an end-effector position
+        # does not. The 1-DOF hinges have an unambiguous anatomical angle in the source, so track it.
+        if self.joint_angle_weight > 0 and self.joint_angle_targets:
+            ja_terms = []
+            for jname, track in self.joint_angle_targets.items():
+                rows = self._resolve_joint_rows((jname,))
+                if len(rows) == 0:
+                    continue
+                _t = min(frame_idx, len(track) - 1)
+                ja_terms.append(cp.square(dqa[rows[0]] + q_a_n_last[rows[0]] - float(track[_t])))
+            if ja_terms:
+                _add_term("joint_angle", self.joint_angle_weight * cp.sum(cp.hstack(ja_terms)))
+
+        # hcrl: BALL-CONTACT RADIUS CONSTRAINT. During a detected contact segment the toe is held at a
+        # constant distance r0 from the (splined) ball center: a target-level hold cannot beat the ~50 mm
+        # tracking residual, so this is a HARD constraint like foot sticking, linearized along the current
+        # radial direction u -- |u . (p + J dqa - ball)| within r0 +- tol. Radial only, so the foot may
+        # roll around the ball surface, which is what dribbling contact does.
+        if self.ball_track is not None and not init_t:
+            _bt = min(frame_idx, len(self.ball_track) - 1)
+            for _link, _s0, _e0, _r0 in self.ball_contacts:
+                if not (_s0 <= frame_idx < _e0) or _link not in J_OC_dict:
+                    continue
+                _u = p_OC_dict[_link] - self.ball_track[_bt]
+                _nu = float(np.linalg.norm(_u))
+                if _nu < 1e-6:
+                    continue
+                _u = _u / _nu
+                _radial = _u @ (p_OC_dict[_link] + J_OC_dict[_link] @ dqa - self.ball_track[_bt])
+                # exact-penalty slack: hard whenever reachable, never infeasible on entry frames where
+                # the toe starts outside r0 +- tol (one linearized step may not close the gap)
+                _sl = cp.Variable(nonneg=True)
+                constraints += [
+                    _radial <= _r0 + self.ball_tolerance + _sl,
+                    _radial >= _r0 - self.ball_tolerance - _sl,
+                ]
+                _add_term("ball_contact_slack", 500.0 * _sl)
+
+        # hcrl: KEYPOINT POSITION TRACKING. The mesh term matches the Laplacian -- relative shape -- and
+        # the only ABSOLUTE position priors were the pelvis and the arm, so hips/knees/ankles/feet had
+        # nothing pinning them to their targets and settled 50-85 mm away. Sweeping solver iterations and
+        # step size changed the residual by 0.1 mm, so this is the cost's optimum, not under-convergence.
+        if self.keypoint_track_weight > 0 and human_src_pts is not None:
+            kp_terms = [
+                cp.sum_squares(J_OC_dict[robot_link_keys[i]] @ dqa - (human_src_pts[i] - p_OC_dict[robot_link_keys[i]]))
+                for i in range(len(robot_link_keys))
+            ]
+            _add_term("keypoint_track", self.keypoint_track_weight * cp.sum(cp.hstack(kp_terms)))
 
         # hcrl: ARM REGULARIZER. Arms carry no contact in most clips, so the mesh leaves them
         # under-determined and the solver parks them in whatever pose the null space lands on (the
@@ -973,7 +1096,7 @@ class InteractionMeshRetargeter:
                 cp.sum_squares(J_OC_dict[robot_link_keys[i]] @ dqa - (human_src_pts[i] - p_OC_dict[robot_link_keys[i]]))
                 for i in self._arm_kps
             ]
-            obj_terms.append(self.arm_reg_weight * cp.sum(cp.hstack(arm_terms)))
+            _add_term("arm_reg", self.arm_reg_weight * cp.sum(cp.hstack(arm_terms)))
 
         # hcrl: NEUTRAL-ANKLE PRIOR IN FREE SWING. Ankle pitch/roll are unconstrained mid-swing and drift
         # onto their stops (roll is pinned in 35% of `edge` frames), so the foot lands pointed/inverted.
@@ -990,7 +1113,7 @@ class InteractionMeshRetargeter:
                 )
                 rows_a = self._ankle_rows[side]
                 if free_swing and rows_a.size:
-                    obj_terms.append(
+                    _add_term("swing_ankle", 
                         self.swing_ankle_weight * cp.sum_squares(dqa[rows_a] + q_a_n_last[rows_a])
                     )
 
@@ -1018,6 +1141,12 @@ class InteractionMeshRetargeter:
 
         dqa_star = dqa.value
         cost = problem.value
+        if getattr(self, "debug_terms", False) and frame_idx % int(getattr(self, "debug_terms_every", 25)) == 0:
+            vals = [(lab, float(t.value)) for lab, t in zip(term_labels, obj_terms)]
+            tot = sum(v for _, v in vals) or 1.0
+            top = sorted(vals, key=lambda kv: -kv[1])
+            print(f"[terms] frame {frame_idx} total={tot:.3f}: "
+                  + "  ".join(f"{k}={v:.3f}({100 * v / tot:.0f}%)" for k, v in top if v > 1e-4), flush=True)
 
         q_star = np.copy(q)
         q_star[self.q_a_indices] = dqa_star + q_a_n_last
@@ -1188,13 +1317,14 @@ class InteractionMeshRetargeter:
         w_nominal_tracking: float = 0.0,
         q_a_nominal: np.ndarray | None = None,
         init_t: bool = False,
-        n_iter: int = 10,
+        n_iter: int = 10,  # overridden by self.solve_n_iter when set
         frame_idx: int = 0,
         q_t_last2: np.ndarray | None = None,
         human_src_pts: np.ndarray | None = None,
     ):
         """Iterate the solver for multiple iterations."""
         last_cost = np.inf
+        n_iter = int(getattr(self, "solve_n_iter", 0) or n_iter)
         for _ in range(n_iter):
             q_a_n_last = q_n[self.q_a_indices]
             q_n, cost = self.solve_single_iteration(

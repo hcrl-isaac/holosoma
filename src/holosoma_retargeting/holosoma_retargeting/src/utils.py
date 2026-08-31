@@ -241,10 +241,16 @@ def preprocess_motion_data(
     human_joints = human_joints * scale
 
     if object_poses is not None:
-        object_poses[:, -3:-1] = object_poses[:, -3:-1] * scale
-        object_z0 = object_poses[0, -1]
-        dz_scale = (object_poses[:, -1] - object_z0) * scale
-        object_poses[:, -1] = object_z0 + dz_scale
+        # Default keeps the object's ABSOLUTE height and scales only its z motion, which assumes the
+        # object's real-world size is meaningful next to the robot. When the human is shrunk to robot
+        # size the object must shrink with it, or the robot reaches for something out of range.
+        if os.environ.get("HOLOSOMA_OBJ_FULL_SCALE", "").lower() in ("1", "true", "yes"):
+            object_poses[:, -3:] = object_poses[:, -3:] * scale
+        else:
+            object_poses[:, -3:-1] = object_poses[:, -3:-1] * scale
+            object_z0 = object_poses[0, -1]
+            dz_scale = (object_poses[:, -1] - object_z0) * scale
+            object_poses[:, -1] = object_z0 + dz_scale
 
         object_moving_frame_idx = extract_object_first_moving_frame(object_poses)
 
