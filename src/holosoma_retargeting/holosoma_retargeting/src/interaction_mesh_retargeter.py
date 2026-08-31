@@ -1108,7 +1108,8 @@ class InteractionMeshRetargeter:
         # roll around the ball surface, which is what dribbling contact does.
         if self.ball_track is not None and not init_t:
             _bt = min(frame_idx, len(self.ball_track) - 1)
-            for _link, _s0, _e0, _r0 in self.ball_contacts:
+            _finite = bool(np.isfinite(self.ball_track[_bt]).all())  # NaN centre = track dropout
+            for _link, _s0, _e0, _r0 in self.ball_contacts if _finite else ():
                 if not (_s0 <= frame_idx < _e0) or _link not in J_OC_dict:
                     continue
                 _u = p_OC_dict[_link] - self.ball_track[_bt]

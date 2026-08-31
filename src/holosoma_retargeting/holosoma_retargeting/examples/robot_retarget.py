@@ -843,38 +843,6 @@ def main(cfg: RetargetingConfig) -> None:
     # Preprocess motion data
     if task_type == "robot_only":
         human_joints = preprocess_motion_data(human_joints, retargeter, toe_names, smpl_scale)
-
-    # hcrl: ball-contact radius constraint (Soccer-X). Needs the splined ball sidecar next to the source
-    # npz; transforms it into the SOLVE frame by recovering the z-shift empirically from the processed
-    # joints, then detects contact segments on the toe keypoints with hysteresis.
-    if os.environ.get("HCRL_BALL_CONSTRAINT", "") in ("1", "true"):
-        _bf = data_path / f"{cfg.task_name}.ball_smooth.npz"
-        if not _bf.exists():
-            _bf = data_path / f"{cfg.task_name}.ball.npz"
-        if _bf.exists():
-            _raw = np.load(str(data_path / f"{cfg.task_name}.npz"))
-            _raw_j = _raw["global_joint_positions"].astype(float)
-            _zshift = float(_raw_j[0, 0, 2] - human_joints[0, 0, 2] / smpl_scale)
-            _ball = np.load(str(_bf))["soccer_pos"].astype(float)
-            _ball[:, 2] -= _zshift
-            _ball = _ball * smpl_scale
-            _n = min(len(human_joints), len(_ball))
-            _segs = []
-            # J_OC_dict in the solver is keyed by SOURCE keypoint names, not robot links
-            for _side, _toe_j, _toe_link in (("L", 10, "L_Foot"), ("R", 11, "R_Foot")):
-                _d = np.linalg.norm(human_joints[:_n, _toe_j] - _ball[:_n], axis=1)
-                _enter, _exit = 0.16 * smpl_scale, 0.22 * smpl_scale
-                _in, _s0, _r0 = False, 0, 0.0
-                for _t in range(_n):
-                    if not _in and _d[_t] < _enter:
-                        _in, _s0, _r0 = True, _t, float(_d[_t])
-                    elif _in and (_d[_t] > _exit or _t == _n - 1):
-                        _segs.append((_toe_link, _s0, _t if _d[_t] > _exit else _t + 1, _r0))
-                        _in = False
-            retargeter.ball_track = _ball
-            retargeter.ball_contacts = tuple(_segs)
-            logger.info("Ball constraint: %d segment(s): %s", len(_segs),
-                        [(l.split("_")[0], a, b, round(r, 3)) for l, a, b, r in _segs])
     elif task_type in {"object_interaction", "climbing"}:
         human_joints, object_poses, object_moving_frame_idx = preprocess_motion_data(
             human_joints,
@@ -957,11 +925,18 @@ def main(cfg: RetargetingConfig) -> None:
 
     # A ball keeps its real radius while the human shrinks to robot size, so scaled contact geometry
     # ends up inside it. Ball centres come from the source's own sidecar and ride along to the output.
-    ball_file = data_path / f"{task_name}.ball.npz"
+    # A splined sidecar is preferred: the raw Soccer-X ball track is low fidelity.
+    ball_file = data_path / f"{task_name}.ball_smooth.npz"
+    if not ball_file.exists():
+        ball_file = data_path / f"{task_name}.ball.npz"
     if ball_file.exists():
         with np.load(str(ball_file)) as ball_npz:
             ball_pos = ball_npz["soccer_pos"].astype(np.float64)
             ball_gap = ball_npz.get("ball_gap")
+        raw_file = data_path / f"{task_name}.ball.npz"
+        if ball_gap is None and ball_file != raw_file and raw_file.exists():
+            with np.load(str(raw_file)) as raw_npz:
+                ball_gap = raw_npz.get("ball_gap")
         if len(ball_pos) == len(human_joints):
             retargeter.ball_radius = ball_contact.BALL_RADIUS_M
             retargeter.ball_seq = ball_contact.to_solver_frame(ball_pos, smpl_scale, retargeter.ball_radius)
@@ -978,6 +953,27 @@ def main(cfg: RetargetingConfig) -> None:
                         retargeter.ball_weight, retargeter.ball_radius,
                         "yes" if ball_gap is not None else "MISSING (non-penetration only)",
                         100 * float(tracked.mean()))
+            # hcrl: optionally HOLD the entry distance r0 through each detected dribble contact -- the
+            # clearance cost alone cannot beat ~50 mm of solver noise, the hard radial band can.
+            if os.environ.get("HCRL_BALL_CONSTRAINT", "") in ("1", "true"):
+                _segs = []
+                # J_OC_dict in the solver is keyed by SOURCE keypoint names, not robot links
+                for _toe_j, _toe_link in ((10, "L_Foot"), (11, "R_Foot")):
+                    _d = np.linalg.norm(human_joints[:, _toe_j] - retargeter.ball_seq, axis=1)
+                    _enter, _exit = 0.16 * smpl_scale, 0.22 * smpl_scale
+                    _in, _s0, _r0, _n = False, 0, 0.0, len(_d)
+                    for _t in range(_n):
+                        if not np.isfinite(_d[_t]):
+                            continue  # dropout frames neither enter nor leave a contact
+                        if not _in and _d[_t] < _enter:
+                            _in, _s0, _r0 = True, _t, float(_d[_t])
+                        elif _in and (_d[_t] > _exit or _t == _n - 1):
+                            _segs.append((_toe_link, _s0, _t if _d[_t] > _exit else _t + 1, _r0))
+                            _in = False
+                retargeter.ball_track = retargeter.ball_seq
+                retargeter.ball_contacts = tuple(_segs)
+                logger.info("Ball contact hold: %d segment(s): %s", len(_segs),
+                            [(l.split("_")[0], a, b, round(r, 3)) for l, a, b, r in _segs])
         else:
             logger.warning("Ball sidecar has %d frames for %d source frames; skipping the ball term",
                            len(ball_pos), len(human_joints))
