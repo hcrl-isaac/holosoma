@@ -22,6 +22,10 @@ from holosoma_retargeting.config_types.retargeter import FootLockConfig, SelfCol
 # Substrings identifying arm keypoints in a joint mapping, across source formats.
 _ARM_KEYPOINT_PARTS = ("shoulder", "elbow", "wrist", "hand")
 
+# Foot points pushed out of the ball per side per frame. The deepest one drives the correction; the
+# rest pin the rotation the rigid foot would otherwise use to dodge it.
+BALL_CONTACT_POINTS = 6
+
 # Add src to path for direct execution
 src_path = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(src_path))
@@ -123,6 +127,13 @@ class InteractionMeshRetargeter:
         self.sole_height_weight = 0.0
         self.sole_planted_height = 0.03
         self._sole_body_id_cache: dict[str, list[int]] = {}
+        # Solver-frame centres (T, 3) of an object that does NOT scale with the human, with the foot
+        # surface points to keep out of it; NaN rows mean "no object this frame".
+        self.ball_seq = None
+        self.ball_clearance_seq = None  # (T, 2) [left, right] clearance each foot must keep from it
+        self.ball_foot_points = None
+        self.ball_radius = 0.0
+        self.ball_weight = 0.0
         self.foot_orient_weight = 0.0  # stance-engagement foot angular-rate damping (0 = off; _foot_orient_damp)
         self.joint_limit_barrier_weight = 0.0  # one-sided hinge inside `margin` of an actuated stop
         self.joint_limit_barrier_margin = 0.0  # rad, absolute cap; 0 disables the barrier
@@ -598,13 +609,16 @@ class InteractionMeshRetargeter:
                 handle.remove()
             robot_kpts_handle_list.clear()
 
-        # Save results
+        # Save results. The ball rides along: downstream contact is only right against the same
+        # centres the clearance term solved against.
+        extras = {} if self.ball_seq is None else {"ball": np.asarray(self.ball_seq, dtype=np.float32)}
         np.savez(
             dest_res_path,
             qpos=np.array(retargeted_motions)[1:],
             human_joints=human_joint_motions,
             fps=30,
             cost=cost,
+            **extras,
         )
         print("Saving results to path:", dest_res_path)
 
@@ -952,6 +966,42 @@ class InteractionMeshRetargeter:
                             * cp.square(cp.pos(Jp[2] @ dqa + (sole_now - target_height)))
                         )
 
+        # hcrl: BALL CLEARANCE. The human is scaled to robot size but the ball is not, so a contact
+        # that was tangent for the human lands (1 - scale) * radius inside it -- 33 mm for the T1.
+        # Each foot is held at the clearance the HUMAN's own foot had, which is an absolute distance
+        # to an object that never shrank. One-sided: the ball track is registered to the mocap only
+        # to within a few cm, so pushing a foot out is safe, pulling it in would chase that noise.
+        if self.ball_weight > 0 and self.ball_seq is not None and not init_t:
+            t = min(max(frame_idx, 0), len(self.ball_seq) - 1)
+            centre = np.asarray(self.ball_seq[t], dtype=np.float64)
+            sides = ("left", "right") if np.isfinite(centre).all() else ()
+            for k, side in enumerate(sides):
+                bid = mujoco.mj_name2id(
+                    self.robot_model, mujoco.mjtObj.mjOBJ_BODY, self.task_constants.FOOT_LINKS[side]
+                )
+                if bid < 0:
+                    continue
+                rot = self._body_rot(q, bid)
+                origin = self.robot_data.xpos[bid].astype(np.float64)
+                points = origin + self.ball_foot_points[side] @ rot.T
+                offset = points - centre
+                dist = np.maximum(np.linalg.norm(offset, axis=1), 1e-9)
+                keep_out = self.ball_radius + (
+                    0.0 if self.ball_clearance_seq is None else float(self.ball_clearance_seq[t, k])
+                )
+                deepest = np.argsort(dist)[:BALL_CONTACT_POINTS]
+                deepest = deepest[dist[deepest] < keep_out]
+                if not deepest.size:
+                    continue
+                Jp = self._calc_pos_jacobian(bid)[:, self.q_a_indices]
+                Jr = self._calc_rot_jacobian(bid)[:, self.q_a_indices]
+                rows = np.stack(
+                    [offset[i] / dist[i] @ self._point_jacobian(Jp, Jr, points[i] - origin) for i in deepest]
+                )
+                obj_terms.append(
+                    self.ball_weight * cp.sum_squares(cp.pos(-(rows @ dqa + (dist[deepest] - keep_out))))
+                )
+
         # hcrl: PELVIS-TRACKING PRIOR. The interaction mesh is a DIFFERENTIAL (Laplacian) objective, so the
         # absolute root pose is in its null space: the solver is free to lean the pelvis back and cancel it
         # with waist pitch (measured corr -0.58, torso net upright). Anchoring the pelvis to the source
@@ -1071,6 +1121,21 @@ class InteractionMeshRetargeter:
                 for name in self.task_constants.SOLE_LINKS[side]
             ]
         return self._sole_body_id_cache[side]
+
+    @staticmethod
+    def _point_jacobian(jac_pos: np.ndarray, jac_rot: np.ndarray, arm: np.ndarray) -> np.ndarray:
+        """Jacobian of a point rigidly offset from a body origin: v_p = v_body + w x arm.
+
+        Args:
+            jac_pos: Positional Jacobian of the body origin, shape (3, n).
+            jac_rot: Rotational Jacobian of the body, shape (3, n).
+            arm: World-frame offset from the body origin to the point, shape (3,).
+
+        Returns:
+            Positional Jacobian of the point, shape (3, n).
+        """
+        skew = np.array([[0.0, -arm[2], arm[1]], [arm[2], 0.0, -arm[0]], [-arm[1], arm[0], 0.0]])
+        return jac_pos - skew @ jac_rot
 
     def _calc_pos_jacobian(self, body_id: int) -> np.ndarray:
         """Positional Jacobian (3 x nq) at the CURRENT robot_data FK state: v_world = Jp @ qdot."""

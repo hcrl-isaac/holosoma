@@ -132,6 +132,19 @@ _FOOT_JOINTS = {"left": (7, 10), "right": (8, 11)}
 _SOLE_QUANTILE = 25
 
 
+def foot_vertices(model: dict) -> dict[str, np.ndarray]:
+    """Vertex indices skinned to each foot, i.e. the surface a ball can touch.
+
+    Args:
+        model: Output of :func:`load_smpl_model`.
+
+    Returns:
+        Per-side arrays of vertex indices.
+    """
+    weights = model["weights"]
+    return {side: np.flatnonzero(sum(weights[:, j] for j in joints) > 0.5) for side, joints in _FOOT_JOINTS.items()}
+
+
 def sole_vertices(model: dict) -> dict[str, np.ndarray]:
     """Vertex indices forming each foot's sole, taken as the lowest band of its skinned vertices.
 
@@ -141,10 +154,9 @@ def sole_vertices(model: dict) -> dict[str, np.ndarray]:
     Returns:
         Per-side arrays of vertex indices.
     """
-    weights, v_template = model["weights"], model["v_template"]
+    v_template = model["v_template"]
     out = {}
-    for side, joints in _FOOT_JOINTS.items():
-        idx = np.flatnonzero(sum(weights[:, j] for j in joints) > 0.5)
+    for side, idx in foot_vertices(model).items():
         # the rest pose is y-up, so the sole is the low-y band
         out[side] = idx[v_template[idx, 1] < np.percentile(v_template[idx, 1], _SOLE_QUANTILE)]
     return out
