@@ -982,6 +982,9 @@ def main(cfg: RetargetingConfig) -> None:
     retargeter.toe_floor_clamp = os.environ.get("HCRL_TOE_CLAMP", "1") not in ("0", "false")
     _map_names = list(retargeter.laplacian_match_links.keys())
     retargeter.toe_kp_indices = [_map_names.index(t) for t in toe_names if t in _map_names]
+    retargeter.hip_kp_indices = [_map_names.index(n) for n in ("L_Hip", "R_Hip") if n in _map_names] or None
+    retargeter.ankle_kp_indices = [_map_names.index(n) for n in ("L_Ankle", "R_Ankle") if n in _map_names] or None
+    retargeter.foot_min_sep = _envf("HCRL_FOOT_MIN_SEP", 0.0)
     _ankles = [n for n in ("L_Ankle", "R_Ankle", "LeftFoot", "RightFoot") if n in retargeter.demo_joints]
     if len(_ankles) == 2:
         retargeter.ankle_kp_cols = np.array([retargeter.demo_joints.index(n) for n in _ankles])

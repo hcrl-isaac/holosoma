@@ -156,6 +156,9 @@ class InteractionMeshRetargeter:
         self.foot_yaw_seq = None
         self.foot_yaw_weight = 0.0
         self.toe_kp_indices = None  # positions of the toe keypoints in the joint mapping (ground anchoring)
+        self.hip_kp_indices = None  # (left, right) hip keypoint positions in the mapping (lateral axis)
+        self.ankle_kp_indices = None
+        self.foot_min_sep = 0.0  # m; minimum lateral toe separation the targets are widened to
         self.self_collision_escape = 0.02  # m per SQP iteration a violated pair may separate
         self.self_collision_margin = 0.0  # m; soft repulsion starts here (0 = off)
         self.self_collision_margin_weight = 0.0
@@ -540,6 +543,25 @@ class InteractionMeshRetargeter:
             dz = kp[:, :, 2].min(axis=1) - offset - new_kp[:, :, 2].min(axis=1)
         out += dz[:, None, None] * np.array([0.0, 0.0, 1.0])
         out[:, self.smplh_mapped_joint_indices] = new_kp + (out[:, self.smplh_mapped_joint_indices] - kp)
+        # Human feet pass closer than the robot's feet are wide; instead of letting self-collision resolve
+        # that at contact, widen each foot's targets laterally (about the pelvis heading) by half the
+        # shortfall, so the solve anticipates the robot's foot width.
+        min_sep = float(getattr(self, "foot_min_sep", 0.0))
+        if min_sep > 0 and self.toe_kp_indices and len(self.toe_kp_indices) == 2 and getattr(self, "hip_kp_indices", None):
+            mapped = np.asarray(self.smplh_mapped_joint_indices)
+            hl, hr = (mapped[i] for i in self.hip_kp_indices)
+            lat = out[:, hl, :2] - out[:, hr, :2]  # left-pointing lateral axis
+            lat /= np.linalg.norm(lat, axis=1, keepdims=True) + 1e-9
+            tl, tr = (mapped[i] for i in self.toe_kp_indices)
+            sep = ((out[:, tl, :2] - out[:, tr, :2]) * lat).sum(1)  # left toe minus right toe, along lateral
+            shortfall = np.clip(min_sep - sep, 0.0, None)  # >0 when the feet are closer than allowed
+            shift = (0.5 * shortfall)[:, None] * lat
+            cols_l = [tl] + ([mapped[self.ankle_kp_indices[0]]] if getattr(self, "ankle_kp_indices", None) else [])
+            cols_r = [tr] + ([mapped[self.ankle_kp_indices[1]]] if getattr(self, "ankle_kp_indices", None) else [])
+            for c in cols_l:
+                out[:, c, :2] += shift
+            for c in cols_r:
+                out[:, c, :2] -= shift
         # On flat ground a toe target below the sole is source noise the non-penetration constraint
         # will refuse anyway; asking for it only drags the body down at foot strike.
         if self.toe_kp_indices and self.object_name == "ground" and offset != 0.0 and getattr(self, "toe_floor_clamp", True):
