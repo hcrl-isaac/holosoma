@@ -249,11 +249,12 @@ JOINTS_MAPPINGS = {
         "R_Wrist": "right_rubber_hand_link",
     },
     # T1 arm chain: AL3 carries the upper-arm twist (Elbow_Pitch); the flexion hinge (Elbow_Yaw) sits at
-    # the *_hand_link origin, and the palm is the *_hand_sphere_link 0.2 m beyond it.
+    # the *_hand_link origin, and the palm is the *_hand_sphere_link 0.2 m beyond it. The Trunk origin is
+    # 0.116 m above the hips where the SMPL pelvis is 0.06, so the pelvis maps to a body at that height.
     ("smplh", "t1"): {
         "L_Elbow": "left_hand_link",
         "R_Elbow": "right_hand_link",
-        "Pelvis": "Trunk",
+        "Pelvis": "pelvis_kp",
         "L_Hip": "Hip_Pitch_Left",
         "R_Hip": "Hip_Pitch_Right",
         "L_Knee": "Shank_Left",
@@ -287,7 +288,7 @@ JOINTS_MAPPINGS = {
     ("smplx", "t1"): {
         "L_Elbow": "left_hand_link",
         "R_Elbow": "right_hand_link",
-        "Pelvis": "Trunk",
+        "Pelvis": "pelvis_kp",
         "L_Hip": "Hip_Pitch_Left",
         "R_Hip": "Hip_Pitch_Right",
         "L_Knee": "Shank_Left",

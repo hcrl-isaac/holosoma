@@ -151,6 +151,11 @@ class InteractionMeshRetargeter:
         self.joint_angle_targets = None  # {joint name: (T,) target angle in rad}
         self.root_quat_track = None  # (T, 4) wxyz source root orientation, or None
         self.swing_ankle_weight = 0.0  # neutral-ankle prior while a foot is in free swing
+        # Source foot heading (T, 2) [left, right], rad about +z: an ankle and a toe point leave the
+        # sole's yaw to a 0.13 m lever, so the robot foot's own forward axis is steered to it.
+        self.foot_yaw_seq = None
+        self.foot_yaw_weight = 0.0
+        self.toe_kp_indices = None  # positions of the toe keypoints in the joint mapping (ground anchoring)
         # Tolerance for foot sticking constraints in x, y.
         self.foot_sticking_tolerance = foot_sticking_tolerance
         self._init_foot_lock(foot_lock)
@@ -508,11 +513,19 @@ class InteractionMeshRetargeter:
         names = list(self.laplacian_match_links.keys())
         out = human_joint_motions.copy()
         kp = out[:, self.smplh_mapped_joint_indices]
-        new_kp = rescale_to_robot_limbs(kp, names, parent, length, rigid)
+        toe_names = [names[i] for i in (self.toe_kp_indices or ())]
+        new_kp = rescale_to_robot_limbs(kp, names, parent, length, rigid, horizontal=toe_names)
         # The rescale grows from the root, so a shorter robot leg lifts the feet off the floor by the
-        # length difference; keep the lowest keypoint's height instead (less the calibrated toe
-        # offset), which is the ground contact.
-        dz = kp[:, :, 2].min(axis=1) - offset - new_kp[:, :, 2].min(axis=1)
+        # length difference; keep the lower toe's height instead (less the calibrated toe offset),
+        # which is the ground contact. One keypoint per frame, so the body cannot hop when the
+        # lowest point would switch between feet.
+        if self.toe_kp_indices:
+            toes = np.asarray(self.toe_kp_indices)
+            lo = toes[np.argmin(kp[:, toes, 2], axis=1)]
+            rows = np.arange(len(kp))
+            dz = kp[rows, lo, 2] - offset - new_kp[rows, lo, 2]
+        else:
+            dz = kp[:, :, 2].min(axis=1) - offset - new_kp[:, :, 2].min(axis=1)
         out += dz[:, None, None] * np.array([0.0, 0.0, 1.0])
         out[:, self.smplh_mapped_joint_indices] = new_kp + (out[:, self.smplh_mapped_joint_indices] - kp)
         return out
@@ -1042,6 +1055,22 @@ class InteractionMeshRetargeter:
                             self.sole_height_weight
                             * cp.square(cp.pos(Jp[2] @ dqa + (sole_now - target_height)))
                         )
+
+        # hcrl: FOOT HEADING. Steer the foot body's forward axis (toward its toe sphere) to the source
+        # ankle->toe heading; yaw only, so it never fights the sole-normal term above.
+        if self.foot_yaw_weight > 0 and self.foot_yaw_seq is not None and not init_t:
+            t = min(max(frame_idx, 0), len(self.foot_yaw_seq) - 1)
+            for k, side in enumerate(("left", "right")):
+                bid = mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, self.task_constants.FOOT_LINKS[side])
+                toe = mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, f"{side}_foot_sphere_5_link")
+                if bid < 0 or toe < 0:
+                    continue
+                self._body_rot(q, bid)  # restores FK(q) for the Jacobian
+                fwd = self.robot_data.xpos[toe] - self.robot_data.xpos[bid]
+                err = float(self.foot_yaw_seq[t, k]) - float(np.arctan2(fwd[1], fwd[0]))
+                err = float(np.arctan2(np.sin(err), np.cos(err)))
+                Jr = self._calc_rot_jacobian(bid)[:, self.q_a_indices]
+                _add_term("foot_yaw", self.foot_yaw_weight * cp.square(Jr[2] @ dqa - err))
 
         # hcrl: BALL CLEARANCE. The human is scaled to robot size but the ball is not, so a contact
         # that was tangent for the human lands (1 - scale) * radius inside it -- 33 mm for the T1.

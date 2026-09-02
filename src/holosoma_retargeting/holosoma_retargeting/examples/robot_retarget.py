@@ -931,6 +931,17 @@ def main(cfg: RetargetingConfig) -> None:
         )
 
     retargeter.foot_step_max_seq = toe_step_cap
+    _map_names = list(retargeter.laplacian_match_links.keys())
+    retargeter.toe_kp_indices = [_map_names.index(t) for t in toe_names if t in _map_names]
+    # hcrl: source foot heading from the ankle->toe direction, for the retargeter's foot-yaw term
+    _fyw = _envf("HCRL_FOOT_YAW_W", 2.0)
+    _ankle_names = [n for n in ("L_Ankle", "R_Ankle", "LeftFoot", "RightFoot") if n in retargeter.demo_joints]
+    if _fyw > 0 and len(_ankle_names) == 2:
+        _ai = [retargeter.demo_joints.index(n) for n in _ankle_names]
+        _fwd = human_joints[:, _toe_idx] - human_joints[:, _ai]
+        retargeter.foot_yaw_seq = np.arctan2(_fwd[..., 1], _fwd[..., 0])
+        retargeter.foot_yaw_weight = _fyw
+        logger.info("Foot heading term: w=%.1f", _fyw)
     logger.info("Toe-step cap: default %.3f, per-clip max L %.3f / R %.3f m/frame",
                 DEFAULT_TOE_STEP_CAP, toe_step_cap[:, 0].max(), toe_step_cap[:, 1].max())
 

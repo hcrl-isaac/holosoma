@@ -63,6 +63,15 @@ def robot_segment_lengths(model, data, mapping: dict[str, str], mj, samples: int
         parent[src] = found
         hops[src] = n
         rigid[src] = found is not None and parent_body[bid] == body_of[found]
+    # A keypoint body that is not an ancestor of the others (a pelvis marker hung off the trunk) still
+    # roots the chains: keypoints with no mapped ancestor hang from it; the sampling below decides rigidity.
+    from holosoma_retargeting.config_types.data_type import root_keypoint
+
+    root = root_keypoint(list(mapping))
+    parent[root] = None
+    for src in mapping:
+        if parent[src] is None and src != root:
+            parent[src] = root
 
     pos0 = fk_positions(None)
     length = {}
@@ -105,11 +114,15 @@ def rescale_to_robot_limbs(
     parent: dict[str, str],
     length: dict[str, float],
     rigid: dict[str, bool] | None = None,
+    horizontal: list[str] | None = None,
 ) -> np.ndarray:
     """Rewrite keypoints so each segment is reachable, preserving directions.
 
     Rigid segments are set to the robot's exact length. Non-rigid spans are only SHORTENED when they
     exceed what the robot can reach, so the solver keeps the freedom to choose the joints in between.
+    ``horizontal`` segments (a foot) keep the source's vertical drop and take up the length change
+    horizontally: stretching a steep human ankle->toe to a long flat robot foot would otherwise lift
+    the ankle target off the sole.
 
     Args:
         keypoints: ``(T, K, 3)`` source keypoints, in the order of ``names``.
@@ -117,12 +130,14 @@ def rescale_to_robot_limbs(
         parent: Source-joint -> parent source-joint (``None`` for the root).
         length: Target length (rigid) or maximum reachable distance (non-rigid).
         rigid: Source-joint -> whether its segment to the parent is rigid. All rigid when omitted.
+        horizontal: Child names whose segment is rescaled in the horizontal plane only.
 
     Returns:
         ``(T, K, 3)`` rescaled keypoints; the root keeps its world position.
     """
     idx = {n: i for i, n in enumerate(names)}
     rigid = rigid or dict.fromkeys(names, True)
+    horizontal = set(horizontal or ())
     out = keypoints.copy()
     ordered, seen = [], set()
 
@@ -147,5 +162,12 @@ def rescale_to_robot_limbs(
         norm = np.linalg.norm(d, axis=-1, keepdims=True)
         unit = np.divide(d, norm, out=np.zeros_like(d), where=norm > 1e-9)
         target = np.full_like(norm, length[n]) if rigid.get(n, True) else np.minimum(norm, length[n])
+        if n in horizontal:
+            dz = np.clip(d[:, 2:3], -target, target)
+            xy_norm = np.linalg.norm(d[:, :2], axis=-1, keepdims=True)
+            xy_unit = np.divide(d[:, :2], xy_norm, out=np.zeros_like(d[:, :2]), where=xy_norm > 1e-9)
+            out[:, i, :2] = out[:, j, :2] + xy_unit * np.sqrt(np.maximum(target**2 - dz**2, 0.0))
+            out[:, i, 2:3] = out[:, j, 2:3] + dz
+            continue
         out[:, i] = out[:, j] + unit * target
     return out
