@@ -754,6 +754,10 @@ def main(cfg: RetargetingConfig) -> None:
         _hy = _envf("HCRL_T1_HIPYAW_COST", 0.0)
         if _hy > 0:
             retargeter.Q_diag[retargeter._resolve_joint_rows(("Left_Hip_Yaw", "Right_Hip_Yaw"))] = _hy
+        # Elbow_Pitch is the upper-arm twist: same hand position with the elbow apex either way
+        _tw = _envf("HCRL_T1_TWIST_COST", 0.0)
+        if _tw > 0:
+            retargeter.Q_diag[retargeter._resolve_joint_rows(("Left_Elbow_Pitch", "Right_Elbow_Pitch"))] = _tw
         _cap = _envf("HCRL_T1_ELBOW_CAP", 1.6)
         retargeter.q_a_lb[retargeter._resolve_joint_rows(("Left_Elbow_Yaw",))] = -_cap
         retargeter.q_a_ub[retargeter._resolve_joint_rows(("Right_Elbow_Yaw",))] = _cap
@@ -937,6 +941,9 @@ def main(cfg: RetargetingConfig) -> None:
     retargeter.toe_floor_clamp = os.environ.get("HCRL_TOE_CLAMP", "1") not in ("0", "false")
     _map_names = list(retargeter.laplacian_match_links.keys())
     retargeter.toe_kp_indices = [_map_names.index(t) for t in toe_names if t in _map_names]
+    _ankles = [n for n in ("L_Ankle", "R_Ankle", "LeftFoot", "RightFoot") if n in retargeter.demo_joints]
+    if len(_ankles) == 2:
+        retargeter.ankle_kp_cols = np.array([retargeter.demo_joints.index(n) for n in _ankles])
     # hcrl: source foot heading from the ankle->toe direction, for the retargeter's foot-yaw term
     _fyw = _envf("HCRL_FOOT_YAW_W", 2.0)
     _ankle_names = [n for n in ("L_Ankle", "R_Ankle", "LeftFoot", "RightFoot") if n in retargeter.demo_joints]
@@ -958,6 +965,32 @@ def main(cfg: RetargetingConfig) -> None:
             sole_normal = source_npz.get("sole_normal")
             source_npz_height = source_npz.get("sole_height")
         if sole_normal is not None:
+            # The SMPL-derived sole normal reads 5-15 deg toe-up while the foot is planted, and the
+            # sole term follows it. Remove each foot's planted-frame median pitch about its lateral
+            # axis (HCRL_SOLE_PLANTED=calib), or force planted soles flat (=flat), or leave it (=off).
+            _mode = os.environ.get("HCRL_SOLE_PLANTED", "calib")
+            if _mode != "off" and source_npz_height is not None:
+                sole_normal = np.array(sole_normal, dtype=np.float64)
+                _pl = (source_npz_height[: len(human_joints)] * smpl_scale) < 0.03
+                _ank = [retargeter.demo_joints.index(n) for n in ("L_Ankle", "R_Ankle") if n in retargeter.demo_joints]
+                for _kk in range(2):
+                    _n = sole_normal[: len(human_joints), _kk]
+                    if _mode == "flat":
+                        _w = np.convolve(_pl[:, _kk].astype(np.float64), np.ones(5) / 5.0, mode="same")[:, None]
+                        _n[:] = (1 - _w) * _n + _w * np.array([0.0, 0.0, 1.0])
+                        continue
+                    _fwd = human_joints[:, _toe_idx[_kk], :2] - human_joints[:, _ank[_kk], :2]
+                    _fwd = np.concatenate([_fwd, np.zeros((len(_fwd), 1))], 1)
+                    _fwd /= np.linalg.norm(_fwd, axis=1, keepdims=True) + 1e-9
+                    _lat = np.cross(np.array([0.0, 0.0, 1.0]), _fwd)  # left-pointing lateral axis
+                    _pitch = np.arcsin(np.clip(-(_n * _fwd).sum(1), -1.0, 1.0))  # toe-up positive
+                    if _pl[:, _kk].sum() >= 5:
+                        _bias = float(np.median(_pitch[_pl[:, _kk]]))
+                        _c, _s = np.cos(_bias), np.sin(_bias)
+                        # Rodrigues rotation of each normal about its own lateral axis by -bias
+                        _n[:] = _n * _c + np.cross(_lat, _n) * _s + _lat * (_lat * _n).sum(1, keepdims=True) * (1 - _c)
+                        logger.info("Sole-normal calibration: foot %d planted median pitch %.1f deg removed", _kk, np.degrees(_bias))
+                sole_normal /= np.linalg.norm(sole_normal, axis=-1, keepdims=True) + 1e-9
             retargeter.sole_normal_seq = sole_normal
             retargeter.sole_normal_weight = _envf("HCRL_SOLE_W", 5.0)
             # heights are source-scale like the keypoints, so they need the same smpl_scale; the

@@ -533,7 +533,12 @@ class InteractionMeshRetargeter:
         # will refuse anyway; asking for it only drags the body down at foot strike.
         if self.toe_kp_indices and self.object_name == "ground" and offset != 0.0 and getattr(self, "toe_floor_clamp", True):
             toe_cols = np.asarray(self.smplh_mapped_joint_indices)[np.asarray(self.toe_kp_indices)]
-            out[:, toe_cols, 2] = np.maximum(out[:, toe_cols, 2], 0.005)
+            lift = np.maximum(0.005 - out[:, toe_cols, 2], 0.0)  # (T, 2)
+            out[:, toe_cols, 2] += lift
+            # lift the ankle with its toe, or the foot target pitches toe-up whenever the toe is clamped
+            ankle_cols = getattr(self, "ankle_kp_cols", None)
+            if ankle_cols is not None:
+                out[:, ankle_cols, 2] += lift
         return out
 
     def retarget_motion(
