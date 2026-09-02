@@ -156,6 +156,10 @@ class InteractionMeshRetargeter:
         self.foot_yaw_seq = None
         self.foot_yaw_weight = 0.0
         self.toe_kp_indices = None  # positions of the toe keypoints in the joint mapping (ground anchoring)
+        # Arm-plane matching: (shoulder, elbow, wrist) keypoint-name triples whose plane normal is
+        # steered to the source's, which fixes the elbow swivel branch without a joint target.
+        self.arm_plane_triples = ()
+        self.arm_plane_weight = 0.0
         # Tolerance for foot sticking constraints in x, y.
         self.foot_sticking_tolerance = foot_sticking_tolerance
         self.stick_tol_seq = None  # optional (T, 2) per-frame [left, right] sticking band, metres
@@ -1087,6 +1091,31 @@ class InteractionMeshRetargeter:
                 err = float(np.arctan2(np.sin(err), np.cos(err)))
                 Jr = self._calc_rot_jacobian(bid)[:, self.q_a_indices]
                 _add_term("foot_yaw", self.foot_yaw_weight * cp.square(Jr[2] @ dqa - err))
+
+        # hcrl: ARM PLANE. The upper-arm twist is unobserved by positions alone (the elbow apex can point
+        # either way for one hand position); match the normal of the shoulder-elbow-wrist plane to the
+        # source's, linearized through the three keypoint Jacobians. Relative shape only, no joint target.
+        if self.arm_plane_weight > 0 and human_src_pts is not None and self.arm_plane_triples:
+            for names in self.arm_plane_triples:
+                if not all(n in J_OC_dict for n in names):
+                    continue
+                s_, e_, w_ = (p_OC_dict[n] for n in names)
+                Js_, Je_, Jw_ = (J_OC_dict[n] for n in names)
+                u, vv = e_ - s_, w_ - e_
+                n_now = np.cross(u, vv)
+                mag = float(np.linalg.norm(n_now))
+                if mag < 1e-4:
+                    continue
+                i_s, i_e, i_w = (robot_link_keys.index(n) for n in names)
+                n_src = np.cross(human_src_pts[i_e] - human_src_pts[i_s], human_src_pts[i_w] - human_src_pts[i_e])
+                if np.linalg.norm(n_src) < 1e-6:
+                    continue
+                n_tgt = n_src / np.linalg.norm(n_src) * mag  # same bend magnitude, source direction
+                # d(u x v) = [u]x dv - [v]x du, with du = Je - Js, dv = Jw - Je (dqa)
+                def skew(a):
+                    return np.array([[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]])
+                dn = skew(u) @ (Jw_ - Je_) - skew(vv) @ (Je_ - Js_)
+                _add_term("arm_plane", self.arm_plane_weight * cp.sum_squares((dn @ dqa + (n_now - n_tgt)) / mag))
 
         # hcrl: BALL CLEARANCE. The human is scaled to robot size but the ball is not, so a contact
         # that was tangent for the human lands (1 - scale) * radius inside it -- 33 mm for the T1.

@@ -754,6 +754,11 @@ def main(cfg: RetargetingConfig) -> None:
         _hy = _envf("HCRL_T1_HIPYAW_COST", 0.0)
         if _hy > 0:
             retargeter.Q_diag[retargeter._resolve_joint_rows(("Left_Hip_Yaw", "Right_Hip_Yaw"))] = _hy
+        # Shoulder_Pitch runs to -190 deg, so a hand in front is also reachable with the arm swung over
+        # the back; a posture cost makes that branch pay.
+        _sc = _envf("HCRL_T1_SHOULDER_COST", 0.0)
+        if _sc > 0:
+            retargeter.Q_diag[retargeter._resolve_joint_rows(("Left_Shoulder_Pitch", "Right_Shoulder_Pitch"))] = _sc
         # Elbow_Pitch is the upper-arm twist: same hand position with the elbow apex either way
         _tw = _envf("HCRL_T1_TWIST_COST", 0.0)
         if _tw > 0:
@@ -778,6 +783,28 @@ def main(cfg: RetargetingConfig) -> None:
         _sv[3:7] = _rootw
         retargeter.smooth_weight = _sv
         logger.info("Root-orientation smoothing weight: %.1f (joints %.2f)", _rootw, float(_sv[7]))
+
+    # hcrl: the upper-arm twist (T1 Elbow_Pitch) is unobserved by keypoints and flips between the two
+    # elbow-swivel solutions in a frame; a per-joint velocity smoothing weight damps that flip.
+    _tws = _envf("HCRL_TWIST_SMOOTH", 0.0)
+    if _tws > 0 and retargeter.q_a_init_idx == -7:
+        if np.isscalar(retargeter.smooth_weight):
+            retargeter.smooth_weight = np.full(retargeter.nq_a, float(retargeter.smooth_weight))
+        for _jn in ("Left_Elbow_Pitch", "Right_Elbow_Pitch"):
+            try:
+                retargeter.smooth_weight[retargeter.robot_model.jnt_qposadr[retargeter.robot_model.joint(_jn).id]] = _tws
+            except KeyError:
+                pass
+        logger.info("Twist-joint smoothing weight: %.1f", _tws)
+
+    _apw = _envf("HCRL_ARM_PLANE_W", 0.0)
+    if _apw > 0:
+        _names = list(retargeter.laplacian_match_links.keys())
+        _tri = [t for t in (("L_Shoulder", "L_Elbow", "L_Wrist"), ("R_Shoulder", "R_Elbow", "R_Wrist"),
+                            ("LeftArm", "LeftForeArm", "LeftHand"), ("RightArm", "RightForeArm", "RightHand")) if all(n in _names for n in t)]
+        retargeter.arm_plane_triples = tuple(_tri)
+        retargeter.arm_plane_weight = _apw
+        logger.info("Arm-plane term: w=%.1f on %d arms", _apw, len(_tri))
 
     _rr = _envf("HCRL_ROOT_RATE_W", 0.0)  # measured: no improvement, off by default
     if _rr > 0 and _root_quat_track is not None:
