@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
 
+import mujoco
 import numpy as np
 import tyro
 
@@ -739,6 +740,24 @@ def main(cfg: RetargetingConfig) -> None:
         "HOLOSOMA_LIMB_RETARGET", ""
     ).lower() in ("1", "true", "yes")
     logger.info("Retargeter created")
+    # hcrl ablation toggles: the Cartesian toe-speed guard and the velocity-heuristic foot sticking
+    if os.environ.get("HCRL_TELEPORT_GUARD", "1") in ("0", "false"):
+        retargeter.teleport_guard = False
+    if os.environ.get("HCRL_FOOT_STICKING", "1") in ("0", "false"):
+        retargeter.activate_foot_sticking = False
+    # hcrl: the G1 config's hand-tuned regularizers, translated to the T1 (waist posture cost; elbow
+    # flexion capped to the same 2/3 of its range the G1's elbow gets). Off unless asked.
+    if os.environ.get("HCRL_T1_MANUAL", "") in ("1", "true") and robot == "t1":
+        _rows = retargeter._resolve_joint_rows(("Waist",))
+        retargeter.Q_diag[_rows] = _envf("HCRL_T1_WAIST_COST", 0.2)
+        # hip yaw's axis is nearly collinear with the thigh, so keypoints barely observe it; damp it
+        _hy = _envf("HCRL_T1_HIPYAW_COST", 0.0)
+        if _hy > 0:
+            retargeter.Q_diag[retargeter._resolve_joint_rows(("Left_Hip_Yaw", "Right_Hip_Yaw"))] = _hy
+        _cap = _envf("HCRL_T1_ELBOW_CAP", 1.6)
+        retargeter.q_a_lb[retargeter._resolve_joint_rows(("Left_Elbow_Yaw",))] = -_cap
+        retargeter.q_a_ub[retargeter._resolve_joint_rows(("Right_Elbow_Yaw",))] = _cap
+        logger.info("T1 manual regularizers: waist cost %.2f, elbow flexion cap %.2f", retargeter.Q_diag[_rows][0], _cap)
 
     # hcrl: anti-oscillation damping when stance windows are active -- with the toe anchored and
     # sole-sphere XY stuck, the lateral-lean null space is near-tied and flips at 15 Hz (ankle-roll
@@ -933,6 +952,27 @@ def main(cfg: RetargetingConfig) -> None:
             tilt = np.degrees(np.arccos(np.clip(sole_normal[..., 2], -1.0, 1.0)))
             logger.info("Sole-orientation matching: weight %.1f, source tilt median %.1f deg",
                         retargeter.sole_normal_weight, float(np.median(tilt)))
+
+        # hcrl: the SMPL toe joint sits 3-6 cm above the sole where the robot's toe sphere is the sole,
+        # so a planted source foot asks the robot foot to hover. Measure the planted-frame median toe
+        # height and let the retargeter drop the whole target by it (after any limb rescale).
+        if os.environ.get("HCRL_FOOT_KP_CALIB", "") in ("1", "true") and source_npz_height is not None:
+            planted = (source_npz_height[: len(human_joints)] * smpl_scale) < 0.03
+            _rm, _rd = retargeter.robot_model, retargeter.robot_data
+            _rd.qpos[:] = 0.0
+            _rd.qpos[3] = 1.0
+            mujoco.mj_forward(_rm, _rd)
+            _bz = lambda n: float(_rd.xpos[mujoco.mj_name2id(_rm, mujoco.mjtObj.mjOBJ_BODY, n), 2])  # noqa: E731
+            toe_z = []
+            for k, side in enumerate(("left", "right")):
+                sole_z = min(_bz(n) for n in constants.SOLE_LINKS[side]) - 0.005
+                robot_toe = retargeter.laplacian_match_links.get(toe_names[k])
+                if robot_toe is not None and planted[:, k].sum() >= 5:
+                    j = retargeter.demo_joints.index(toe_names[k])
+                    toe_z.append(float(np.median(human_joints[planted[:, k], j, 2])) - (_bz(robot_toe) - sole_z))
+            if toe_z:
+                retargeter.ground_kp_offset = float(np.mean(toe_z))
+                logger.info("Foot keypoint calibration: planted toe target %.1f mm above the robot toe", 1000 * retargeter.ground_kp_offset)
 
     # A ball keeps its real radius while the human shrinks to robot size, so scaled contact geometry
     # ends up inside it. Ball centres come from the source's own sidecar and ride along to the output.

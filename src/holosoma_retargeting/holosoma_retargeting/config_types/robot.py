@@ -286,8 +286,8 @@ class RobotConfig:
 
         if self.robot_type == "g1":
             return np.arange(19)
-        if self.robot_type == "t1":
-            return np.concatenate([np.arange(7), np.arange(11, 23)])
+        if self.robot_type == "t1":  # floating base + the 12 leg joints (qpos 18..29), as for the G1
+            return np.concatenate([np.arange(7), np.arange(18, 30)])
         # Default: return empty array if robot type not defined (nominal tracking not used)
         return np.array([], dtype=int)
 

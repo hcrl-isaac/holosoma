@@ -76,7 +76,8 @@ def robot_segment_lengths(model, data, mapping: dict[str, str], mj, samples: int
         if rigid[src]:
             length[src] = float(_np.linalg.norm(pos0[src] - pos0[p_src]))
             continue
-        best = float(_np.linalg.norm(pos0[src] - pos0[p_src]))
+        zero = float(_np.linalg.norm(pos0[src] - pos0[p_src]))
+        best, worst = zero, zero
         for _ in range(samples):
             q = _np.zeros(model.nq)
             m = min(model.njnt, len(lo))
@@ -86,8 +87,15 @@ def robot_segment_lengths(model, data, mapping: dict[str, str], mj, samples: int
                 if adr < model.nq and b > a:
                     q[adr] = rng.uniform(a, b)
             pos = fk_positions(q)
-            best = max(best, float(_np.linalg.norm(pos[src] - pos[p_src])))
-        length[src] = best
+            dist = float(_np.linalg.norm(pos[src] - pos[p_src]))
+            best, worst = max(best, dist), min(worst, dist)
+        # A span whose joints barely change its length (a waist yaw between pelvis and hip) is rigid
+        # in effect; prescribing it keeps the hips where the robot's hips are.
+        if best - worst < 0.1 * best:
+            rigid[src] = True
+            length[src] = zero
+        else:
+            length[src] = best
     return parent, length, rigid
 
 

@@ -488,8 +488,9 @@ class InteractionMeshRetargeter:
         Returns:
             ``(T, J, 3)`` with the mapped keypoints rescaled; other joints untouched.
         """
+        offset = float(getattr(self, "ground_kp_offset", 0.0))  # planted toe target height above the robot toe
         if not getattr(self, "limb_retarget", False):
-            return human_joint_motions
+            return human_joint_motions - np.array([0.0, 0.0, offset])
         import mujoco as mj
 
         from holosoma_retargeting.hcrl.limb_retarget import rescale_to_robot_limbs, robot_segment_lengths
@@ -507,7 +508,13 @@ class InteractionMeshRetargeter:
         names = list(self.laplacian_match_links.keys())
         out = human_joint_motions.copy()
         kp = out[:, self.smplh_mapped_joint_indices]
-        out[:, self.smplh_mapped_joint_indices] = rescale_to_robot_limbs(kp, names, parent, length, rigid)
+        new_kp = rescale_to_robot_limbs(kp, names, parent, length, rigid)
+        # The rescale grows from the root, so a shorter robot leg lifts the feet off the floor by the
+        # length difference; keep the lowest keypoint's height instead (less the calibrated toe
+        # offset), which is the ground contact.
+        dz = kp[:, :, 2].min(axis=1) - offset - new_kp[:, :, 2].min(axis=1)
+        out += dz[:, None, None] * np.array([0.0, 0.0, 1.0])
+        out[:, self.smplh_mapped_joint_indices] = new_kp + (out[:, self.smplh_mapped_joint_indices] - kp)
         return out
 
     def retarget_motion(
