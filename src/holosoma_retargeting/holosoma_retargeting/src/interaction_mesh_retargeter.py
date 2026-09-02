@@ -158,6 +158,7 @@ class InteractionMeshRetargeter:
         self.toe_kp_indices = None  # positions of the toe keypoints in the joint mapping (ground anchoring)
         # Tolerance for foot sticking constraints in x, y.
         self.foot_sticking_tolerance = foot_sticking_tolerance
+        self.stick_tol_seq = None  # optional (T, 2) per-frame [left, right] sticking band, metres
         self._init_foot_lock(foot_lock)
         self._self_collision_config = self_collision
 
@@ -860,8 +861,13 @@ class InteractionMeshRetargeter:
                     apply_left = ("left" in key) and foot_sticking[left_key] and not anchor_active
                     apply_right = ("right" in key) and foot_sticking[right_key] and not anchor_active
                     if apply_left or apply_right:
-                        p_lb = p_WF_t_last_dict[key] - p_WF_dict[key] - self.foot_sticking_tolerance
-                        p_ub = p_lb + 2 * self.foot_sticking_tolerance  # symmetric window
+                        # A fixed 1 mm band stops a settling foot dead and releases it with a jump;
+                        # let the stance foot move as far as the SOURCE foot moved this frame.
+                        tol = self.foot_sticking_tolerance
+                        if self.stick_tol_seq is not None:
+                            tol = float(self.stick_tol_seq[min(frame_idx, len(self.stick_tol_seq) - 1), 0 if apply_left else 1])
+                        p_lb = p_WF_t_last_dict[key] - p_WF_dict[key] - tol
+                        p_ub = p_lb + 2 * tol  # symmetric window
 
                         Jxy = J_WF[:2, self.q_a_indices]  # (2 x nq_act)
                         constraints += [

@@ -931,6 +931,9 @@ def main(cfg: RetargetingConfig) -> None:
         )
 
     retargeter.foot_step_max_seq = toe_step_cap
+    # stance band follows the source toe's own per-frame travel (HCRL_STICK_BAND=0: fixed 1 mm band)
+    if os.environ.get("HCRL_STICK_BAND", "1") not in ("0", "false"):
+        retargeter.stick_tol_seq = np.maximum(_steps, retargeter.foot_sticking_tolerance)
     retargeter.toe_floor_clamp = os.environ.get("HCRL_TOE_CLAMP", "1") not in ("0", "false")
     _map_names = list(retargeter.laplacian_match_links.keys())
     retargeter.toe_kp_indices = [_map_names.index(t) for t in toe_names if t in _map_names]
