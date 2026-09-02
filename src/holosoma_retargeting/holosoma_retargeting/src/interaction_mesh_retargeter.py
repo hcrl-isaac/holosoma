@@ -528,6 +528,11 @@ class InteractionMeshRetargeter:
             dz = kp[:, :, 2].min(axis=1) - offset - new_kp[:, :, 2].min(axis=1)
         out += dz[:, None, None] * np.array([0.0, 0.0, 1.0])
         out[:, self.smplh_mapped_joint_indices] = new_kp + (out[:, self.smplh_mapped_joint_indices] - kp)
+        # On flat ground a toe target below the sole is source noise the non-penetration constraint
+        # will refuse anyway; asking for it only drags the body down at foot strike.
+        if self.toe_kp_indices and self.object_name == "ground" and offset != 0.0 and getattr(self, "toe_floor_clamp", True):
+            toe_cols = np.asarray(self.smplh_mapped_joint_indices)[np.asarray(self.toe_kp_indices)]
+            out[:, toe_cols, 2] = np.maximum(out[:, toe_cols, 2], 0.005)
         return out
 
     def retarget_motion(

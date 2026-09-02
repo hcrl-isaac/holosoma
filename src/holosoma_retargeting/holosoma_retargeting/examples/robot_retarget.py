@@ -931,6 +931,7 @@ def main(cfg: RetargetingConfig) -> None:
         )
 
     retargeter.foot_step_max_seq = toe_step_cap
+    retargeter.toe_floor_clamp = os.environ.get("HCRL_TOE_CLAMP", "1") not in ("0", "false")
     _map_names = list(retargeter.laplacian_match_links.keys())
     retargeter.toe_kp_indices = [_map_names.index(t) for t in toe_names if t in _map_names]
     # hcrl: source foot heading from the ankle->toe direction, for the retargeter's foot-yaw term

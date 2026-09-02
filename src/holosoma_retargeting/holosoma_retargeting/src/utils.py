@@ -716,10 +716,31 @@ def extract_foot_sticking_sequence_velocity(smpl_joints, demo_joints, foot_names
     left_toe_velocity = np.concatenate([[velocity_threshold + 1], left_toe_velocity])
     right_toe_velocity = np.concatenate([[velocity_threshold + 1], right_toe_velocity])
 
-    return [
-        {"L_Toe": left_toe_velocity[i] <= velocity_threshold, "R_Toe": right_toe_velocity[i] <= velocity_threshold}
-        for i in range(len(smpl_joints))
-    ]
+    # Hysteresis + a minimum run length: a raw threshold flickers around foot strike, and each flip
+    # engages or releases a hard xy lock, which the whole body pays for as a hop.
+    left = _stance_with_hysteresis(left_toe_velocity, velocity_threshold)
+    right = _stance_with_hysteresis(right_toe_velocity, velocity_threshold)
+    return [{"L_Toe": bool(left[i]), "R_Toe": bool(right[i])} for i in range(len(smpl_joints))]
+
+
+def _stance_with_hysteresis(speed, threshold, release_ratio=2.0, min_run=3):
+    """Stance mask from a per-frame speed: enter below ``threshold``, leave above ``release_ratio`` x it."""
+    stance = np.zeros(len(speed), dtype=bool)
+    on = False
+    for i, v in enumerate(speed):
+        on = v <= threshold if not on else v <= release_ratio * threshold
+        stance[i] = on
+    # drop runs (of either state) shorter than min_run by flipping them to the surrounding state
+    for _ in range(2):
+        i = 0
+        while i < len(stance):
+            j = i
+            while j < len(stance) and stance[j] == stance[i]:
+                j += 1
+            if j - i < min_run and i > 0 and j < len(stance):
+                stance[i:j] = stance[i - 1]
+            i = j
+    return stance
 
 
 def transform_y_up_to_z_up(points):
