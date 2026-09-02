@@ -248,9 +248,11 @@ JOINTS_MAPPINGS = {
         "L_Wrist": "left_rubber_hand_link",
         "R_Wrist": "right_rubber_hand_link",
     },
+    # T1 arm chain: AL3 carries the upper-arm twist (Elbow_Pitch); the flexion hinge (Elbow_Yaw) sits at
+    # the *_hand_link origin, and the palm is the *_hand_sphere_link 0.2 m beyond it.
     ("smplh", "t1"): {
-        "L_Elbow": "AL3",
-        "R_Elbow": "AR3",
+        "L_Elbow": "left_hand_link",
+        "R_Elbow": "right_hand_link",
         "Pelvis": "Trunk",
         "L_Hip": "Hip_Pitch_Left",
         "R_Hip": "Hip_Pitch_Right",
@@ -262,8 +264,8 @@ JOINTS_MAPPINGS = {
         "R_Ankle": "Ankle_Cross_Right",
         "L_Toe": "left_foot_sphere_5_link",
         "R_Toe": "right_foot_sphere_5_link",
-        "L_Wrist": "left_hand_link",
-        "R_Wrist": "right_hand_link",
+        "L_Wrist": "left_hand_sphere_link",
+        "R_Wrist": "right_hand_sphere_link",
     },
     ("smplx", "g1"): {
         "Pelvis": "pelvis_contour_link",
@@ -283,8 +285,8 @@ JOINTS_MAPPINGS = {
         "R_Wrist": "right_rubber_hand_link",
     },
     ("smplx", "t1"): {
-        "L_Elbow": "AL3",
-        "R_Elbow": "AR3",
+        "L_Elbow": "left_hand_link",
+        "R_Elbow": "right_hand_link",
         "Pelvis": "Trunk",
         "L_Hip": "Hip_Pitch_Left",
         "R_Hip": "Hip_Pitch_Right",
@@ -296,8 +298,8 @@ JOINTS_MAPPINGS = {
         "R_Ankle": "Ankle_Cross_Right",
         "L_Foot": "left_foot_sphere_5_link",
         "R_Foot": "right_foot_sphere_5_link",
-        "L_Wrist": "left_hand_link",
-        "R_Wrist": "right_hand_link",
+        "L_Wrist": "left_hand_sphere_link",
+        "R_Wrist": "right_hand_sphere_link",
     },
     ("g1fk", "g1"): {j: j for j in G1FK_DEMO_JOINTS},
     ("mocap", "g1"): {

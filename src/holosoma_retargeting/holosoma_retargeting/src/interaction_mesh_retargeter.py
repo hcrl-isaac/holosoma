@@ -548,7 +548,10 @@ class InteractionMeshRetargeter:
             q_locked_list = np.zeros((num_frames, self.nq))
             q_locked_list[0, self.q_a_indices] = q_a_init
 
-        q_locked_list[:, -7:] = object_poses_augmented
+        # Only a dynamic object owns the last 7 qpos slots; on a ground scene they are the right leg,
+        # and the identity object pose would seed Right_Hip_Yaw at 1.0 (its stop) on every clip.
+        if self.has_dynamic_object:
+            q_locked_list[:, -7:] = object_poses_augmented
         q = np.copy(q_locked_list[0])
         retargeted_motions = [q]
 
@@ -901,14 +904,18 @@ class InteractionMeshRetargeter:
             rhs = min(-phi - self.penetration_tolerance, 0.02)
             constraints += [Ja_n @ dqa >= rhs]
 
-        # Self-collision constraints
+        # Self-collision constraints: new_distance >= tolerance  =>  phi + J @ dqa >= tol. Exact-penalty
+        # slack (hard whenever reachable) since a pair can start overlapping while foot sticking or the
+        # trust region forbids the separating step, which makes the pure inequality infeasible.
         Js_sc, phis_sc = self._compute_self_collision_constraints(frame_idx)
+        sc_slacks = []
         for key, phi in phis_sc.items():
             Ja_n_full = Js_sc[key]
             Ja_n = Ja_n_full[self.q_a_indices]
-            # Enforce: new_distance >= tolerance  =>  phi + J @ dqa >= tol
-            rhs = self._self_collision_tolerance - phi
-            constraints += [Ja_n @ dqa >= rhs]
+            rhs = min(self._self_collision_tolerance - phi, 0.02)
+            sl = cp.Variable(nonneg=True)
+            sc_slacks.append(sl)
+            constraints += [Ja_n @ dqa >= rhs - sl]
 
         # Joint limits constraints (actuated)
         if self.activate_joint_limits:
@@ -931,6 +938,9 @@ class InteractionMeshRetargeter:
 
         if use_lap:
             _add_term("laplacian", cp.sum_squares(cp.multiply(sqrt_w3, lap_var - target_lap_vec)))
+
+        if sc_slacks:
+            _add_term("self_collision_slack", 500.0 * cp.sum(cp.hstack(sc_slacks)))
 
         # foot anchor pull (see foot-lock block): heavily weighted so stance feet land and stay planted
         if apply_foot_lock and foot_anchor_terms:

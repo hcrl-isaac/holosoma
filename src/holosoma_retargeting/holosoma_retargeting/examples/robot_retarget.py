@@ -515,6 +515,17 @@ def build_retargeter_kwargs_from_config(
     }
     if task_type == "climbing":
         kwargs["nominal_tracking_tau"] = retargeter_config.nominal_tracking_tau
+    # hcrl: body pairs kept apart, e.g. "left_foot_link:right_foot_link,Shank_Left:Shank_Right"; the
+    # non-penetration constraint only ever pairs the robot with the ground/object, so feet may cross.
+    _sc_pairs = os.environ.get("HCRL_SELF_COLLISION", "").strip()
+    if _sc_pairs:
+        from holosoma_retargeting.config_types.retargeter import SelfCollisionConfig
+
+        kwargs["self_collision"] = SelfCollisionConfig(
+            enable=True,
+            pairs=[tuple(p.split(":")) for p in _sc_pairs.split(",")],
+            tolerance=_envf("HCRL_SELF_COLLISION_TOL", 0.01),
+        )
     return kwargs
 
 
