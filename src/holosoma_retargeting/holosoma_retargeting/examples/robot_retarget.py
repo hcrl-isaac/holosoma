@@ -797,6 +797,20 @@ def main(cfg: RetargetingConfig) -> None:
                 pass
         logger.info("Twist-joint smoothing weight: %.1f", _tws)
 
+    # self-collision shaping: per-iteration escape cap, soft margin repulsion
+    retargeter.self_collision_escape = _envf("HCRL_SELF_COLLISION_ESCAPE", 0.02)
+    retargeter.self_collision_margin = _envf("HCRL_SELF_COLLISION_MARGIN", 0.0)
+    retargeter.self_collision_margin_weight = _envf("HCRL_SELF_COLLISION_MARGIN_W", 100.0)
+    # straight-arm twist prior: weight fades to zero once the source elbow bends past ~25 deg
+    _tp = _envf("HCRL_STRAIGHT_TWIST_W", 0.0)
+    if _tp > 0 and robot == "t1":
+        from holosoma_retargeting.hcrl.source_angles import t1_joint_angle_targets as _tja
+        _ang = _tja(human_joints)
+        _bend = np.stack([np.abs(_ang["Left_Elbow_Yaw"]), np.abs(_ang["Right_Elbow_Yaw"])], 1)
+        retargeter.twist_prior_seq = _tp * np.clip(1.0 - np.degrees(_bend) / 25.0, 0.0, 1.0)
+        retargeter.twist_rows = [int(retargeter._resolve_joint_rows((n,))[0]) for n in ("Left_Elbow_Pitch", "Right_Elbow_Pitch")]
+        logger.info("Straight-arm twist prior: w=%.1f, active on %.0f%% of frames", _tp, 100 * (retargeter.twist_prior_seq > 0).any(1).mean())
+
     _apw = _envf("HCRL_ARM_PLANE_W", 0.0)
     if _apw > 0:
         _names = list(retargeter.laplacian_match_links.keys())

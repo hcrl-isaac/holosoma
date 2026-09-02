@@ -156,6 +156,13 @@ class InteractionMeshRetargeter:
         self.foot_yaw_seq = None
         self.foot_yaw_weight = 0.0
         self.toe_kp_indices = None  # positions of the toe keypoints in the joint mapping (ground anchoring)
+        self.self_collision_escape = 0.02  # m per SQP iteration a violated pair may separate
+        self.self_collision_margin = 0.0  # m; soft repulsion starts here (0 = off)
+        self.self_collision_margin_weight = 0.0
+        # Per-frame posture cost on the upper-arm twist rows: (T, 2) weights, used when the source elbow is
+        # nearly straight and the swivel is undefined, so the twist does not wander into a branch.
+        self.twist_prior_seq = None
+        self.twist_rows = None
         # Arm-plane matching: (shoulder, elbow, wrist) keypoint-name triples whose plane normal is
         # steered to the source's, which fixes the elbow swivel branch without a joint target.
         self.arm_plane_triples = ()
@@ -948,14 +955,18 @@ class InteractionMeshRetargeter:
         # slack (hard whenever reachable) since a pair can start overlapping while foot sticking or the
         # trust region forbids the separating step, which makes the pure inequality infeasible.
         Js_sc, phis_sc = self._compute_self_collision_constraints(frame_idx)
-        sc_slacks = []
+        sc_slacks, sc_soft = [], []
         for key, phi in phis_sc.items():
             Ja_n_full = Js_sc[key]
             Ja_n = Ja_n_full[self.q_a_indices]
-            rhs = min(self._self_collision_tolerance - phi, 0.02)
+            rhs = min(self._self_collision_tolerance - phi, self.self_collision_escape)
             sl = cp.Variable(nonneg=True)
             sc_slacks.append(sl)
             constraints += [Ja_n @ dqa >= rhs - sl]
+            # smooth repulsion inside `margin`: the pair is pushed apart as it approaches, so the
+            # separation is anticipated over frames rather than paid at contact
+            if self.self_collision_margin > 0:
+                sc_soft.append(cp.square(cp.pos(self.self_collision_margin - (phi + Ja_n @ dqa))))
 
         # Joint limits constraints (actuated)
         if self.activate_joint_limits:
@@ -981,6 +992,8 @@ class InteractionMeshRetargeter:
 
         if sc_slacks:
             _add_term("self_collision_slack", 500.0 * cp.sum(cp.hstack(sc_slacks)))
+        if sc_soft:
+            _add_term("self_collision_margin", self.self_collision_margin_weight * cp.sum(cp.hstack(sc_soft)))
 
         # foot anchor pull (see foot-lock block): heavily weighted so stance feet land and stay planted
         if apply_foot_lock and foot_anchor_terms:
@@ -1000,6 +1013,12 @@ class InteractionMeshRetargeter:
         # Q_diag cost
         Qd = np.asarray(self.Q_diag, dtype=float).reshape(-1)
         _add_term("posture_Qd", cp.sum_squares(cp.multiply(np.sqrt(Qd), dqa + q_a_n_last)))
+        if self.twist_prior_seq is not None and self.twist_rows is not None:
+            _t = min(frame_idx, len(self.twist_prior_seq) - 1)
+            for k, row in enumerate(self.twist_rows):
+                w_t = float(self.twist_prior_seq[_t, k])
+                if w_t > 0:
+                    _add_term("twist_prior", w_t * cp.square(dqa[row] + q_a_n_last[row]))
 
         # Acceleration damping: penalize deviation from the constant-velocity extrapolation. Unlike the
         # velocity term it costs nothing on smooth motion, so it suppresses 2-frame QP-tie flips only.
