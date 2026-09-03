@@ -812,6 +812,7 @@ def main(cfg: RetargetingConfig) -> None:
     retargeter.foot_stack_clearance = _envf("HCRL_FOOT_STACK_CLEARANCE", 0.0)
     retargeter.ground_margin = _envf("HCRL_GROUND_MARGIN", 0.0)
     retargeter.body_contact_gain = _envf("HCRL_BODY_CONTACT_GAIN", 0.0)
+    retargeter.body_contact_root = _envf("HCRL_BODY_CONTACT_ROOT", 0.0)
     retargeter.ground_margin_weight = _envf("HCRL_GROUND_MARGIN_W", 200.0)
     retargeter.foot_stack_weight = _envf("HCRL_FOOT_STACK_W", 100.0)
     # straight-arm twist prior: weight fades to zero once the source elbow bends past ~25 deg

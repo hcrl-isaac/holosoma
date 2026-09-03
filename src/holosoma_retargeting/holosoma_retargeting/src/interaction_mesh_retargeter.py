@@ -164,6 +164,7 @@ class InteractionMeshRetargeter:
         self.self_collision_margin_weight = 0.0
         self.ground_margin = 0.0  # m; soft cushion above the ground for non-foot bodies (0 = off)
         self.body_contact_gain = 0.0  # temporal smoothing x (1 + gain * non-foot bodies on the ground)
+        self.body_contact_root = 0.0  # root-orientation smoothing added per non-foot body on the ground
         self.ground_margin_weight = 200.0
         self.foot_stack_clearance = 0.0  # m of extra vertical gap a crossing foot keeps over the stance foot
         self.foot_stack_thickness = 0.035  # m; foot body origin to its top surface
@@ -1100,6 +1101,11 @@ class InteractionMeshRetargeter:
         # Smoothness cost. Frame 0 has no previous frame -- q_t_last is the initial guess (a T-pose),
         # and pulling toward it makes the first solved frame a swing away from it.
         dqa_smooth = q_t_last[self.q_a_indices] - q_a_n_last
+        # additive root-orientation damping per body-ground contact: the lying-body rock is in the
+        # root, and a route without absolute position terms cannot afford to slow every joint
+        root_extra = self.body_contact_root * n_body_ground
+        if root_extra > 0 and not init_t:
+            _add_term("root_contact_damp", root_extra * cp.sum_squares(dqa[3:7] - dqa_smooth[3:7]))
         if init_t:
             pass
         elif np.isscalar(self.smooth_weight):
