@@ -162,6 +162,9 @@ class InteractionMeshRetargeter:
         self.self_collision_escape = 0.02  # m per SQP iteration a violated pair may separate
         self.self_collision_margin = 0.0  # m; soft repulsion starts here (0 = off)
         self.self_collision_margin_weight = 0.0
+        self.ground_margin = 0.0  # m; soft cushion above the ground for non-foot bodies (0 = off)
+        self.body_contact_gain = 0.0  # temporal smoothing x (1 + gain * non-foot bodies on the ground)
+        self.ground_margin_weight = 200.0
         self.foot_stack_clearance = 0.0  # m of extra vertical gap a crossing foot keeps over the stance foot
         self.foot_stack_thickness = 0.035  # m; foot body origin to its top surface
         self.foot_stack_half_width = 0.05  # m; footprint half extents, for the plan-overlap test
@@ -972,11 +975,25 @@ class InteractionMeshRetargeter:
         # cleaned); demanding full escape in one linearized step is jointly infeasible, so cap the
         # per-iteration escape rate -- existing penetration decays over a few iterations instead.
         Js, phis = self._update_jacobians_and_phis_from_q(q)
+        ground_soft = []
+        # bodies other than the feet touching the ground: a body lying on the floor is held by many
+        # contacts against targets it cannot reach, and the root rocks as the active set switches
+        n_body_ground = sum(
+            1 for key in phis
+            if any("ground" in self._geom_names[g] for g in key) and not any("foot" in self._geom_names[g] for g in key)
+        )
+        contact_gain = 1.0 + self.body_contact_gain * n_body_ground
         for key, phi in phis.items():
             Ja_n_full = Js[key]
             Ja_n = Ja_n_full[self.q_a_indices]
             rhs = min(-phi - self.penetration_tolerance, 0.02)
             constraints += [Ja_n @ dqa >= rhs]
+            # cushion: a body lying on the ground otherwise rides the hard boundary while the targets
+            # pull it into the floor, and rocks as the active contact set switches
+            if self.ground_margin > 0:
+                names = (self._geom_names[key[0]], self._geom_names[key[1]])
+                if any("ground" in n for n in names) and not any("foot" in n for n in names):
+                    ground_soft.append(cp.square(cp.pos(self.ground_margin - (phi + Ja_n @ dqa))))
 
         # Self-collision constraints: new_distance >= tolerance  =>  phi + J @ dqa >= tol. Exact-penalty
         # slack (hard whenever reachable) since a pair can start overlapping while foot sticking or the
@@ -1021,6 +1038,8 @@ class InteractionMeshRetargeter:
             _add_term("self_collision_slack", 500.0 * cp.sum(cp.hstack(sc_slacks)))
         if sc_soft:
             _add_term("self_collision_margin", self.self_collision_margin_weight * cp.sum(cp.hstack(sc_soft)))
+        if ground_soft:
+            _add_term("ground_margin", self.ground_margin_weight * cp.sum(cp.hstack(ground_soft)))
 
         # hcrl: FOOT STACKING CLEARANCE. When the feet overlap in plan the crossing foot must clear the
         # stance foot vertically; the required gap ramps with the overlap, so the foot descends as it
@@ -1075,7 +1094,7 @@ class InteractionMeshRetargeter:
         # velocity term it costs nothing on smooth motion, so it suppresses 2-frame QP-tie flips only.
         if np.any(self.accel_damp_weight) and (q_t_last2 is not None) and not init_t:
             dqa_cv = 2 * q_t_last[self.q_a_indices] - q_t_last2[self.q_a_indices] - q_a_n_last
-            w_ad = np.broadcast_to(np.asarray(self.accel_damp_weight, dtype=float), (self.nq_a,))
+            w_ad = contact_gain * np.broadcast_to(np.asarray(self.accel_damp_weight, dtype=float), (self.nq_a,))
             _add_term("accel_damp", cp.sum_squares(cp.multiply(np.sqrt(w_ad), dqa - dqa_cv)))
 
         # Smoothness cost. Frame 0 has no previous frame -- q_t_last is the initial guess (a T-pose),
@@ -1084,9 +1103,9 @@ class InteractionMeshRetargeter:
         if init_t:
             pass
         elif np.isscalar(self.smooth_weight):
-            _add_term("smooth_scalar", self.smooth_weight * cp.sum_squares(dqa - dqa_smooth))
+            _add_term("smooth_scalar", contact_gain * self.smooth_weight * cp.sum_squares(dqa - dqa_smooth))
         else:
-            Wsmooth = np.asarray(self.smooth_weight, dtype=float)
+            Wsmooth = contact_gain * np.asarray(self.smooth_weight, dtype=float)
             if Wsmooth.ndim == 1:
                 _add_term("smooth_vec", cp.sum_squares(cp.multiply(np.sqrt(Wsmooth), dqa - dqa_smooth)))
             else:
