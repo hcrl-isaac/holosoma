@@ -164,7 +164,8 @@ class InteractionMeshRetargeter:
         self.self_collision_margin_weight = 0.0
         self.foot_stack_clearance = 0.0  # m of extra vertical gap a crossing foot keeps over the stance foot
         self.foot_stack_thickness = 0.035  # m; foot body origin to its top surface
-        self.foot_stack_span = 0.20  # m; centre distance below which the feet count as overlapping in plan
+        self.foot_stack_half_width = 0.05  # m; footprint half extents, for the plan-overlap test
+        self.foot_stack_half_length = 0.11
         self.foot_stack_weight = 100.0
         # Per-frame posture cost on the upper-arm twist rows: (T, 2) weights, used when the source elbow is
         # nearly straight and the swivel is undefined, so the twist does not wander into a branch.
@@ -1030,10 +1031,15 @@ class InteractionMeshRetargeter:
                 self.robot_data.qpos[:] = q
                 mujoco.mj_forward(self.robot_model, self.robot_data)
                 pl, pr = (self.robot_data.xpos[b].copy() for b in ids)
-                d_xy = float(np.linalg.norm((pl - pr)[:2]))
-                overlap = float(np.clip((self.foot_stack_span - d_xy) / self.foot_stack_span, 0.0, 1.0))
+                hi, lo_ = (0, 1) if pl[2] >= pr[2] else (1, 0)
+                # overlap in the LOWER foot's own frame: side-by-side feet (lateral offset beyond the
+                # foot's half-width) do not overlap however close their centres are
+                R_lo = self.robot_data.xmat[ids[lo_]].reshape(3, 3)
+                rel = R_lo.T @ ((pl if hi == 0 else pr) - (pr if hi == 0 else pl))
+                lat = float(np.clip((self.foot_stack_half_width + 0.02 - abs(rel[1])) / 0.02, 0.0, 1.0))
+                lon = float(np.clip((self.foot_stack_half_length + 0.03 - abs(rel[0])) / 0.03, 0.0, 1.0))
+                overlap = lat * lon
                 if overlap > 0.0:
-                    hi, lo_ = (0, 1) if pl[2] >= pr[2] else (1, 0)
                     J_hi = self._calc_pos_jacobian(ids[hi])[:, self.q_a_indices]
                     J_lo = self._calc_pos_jacobian(ids[lo_])[:, self.q_a_indices]
                     dz_now = float((pl if hi == 0 else pr)[2] - (pr if hi == 0 else pl)[2])
@@ -1072,9 +1078,12 @@ class InteractionMeshRetargeter:
             w_ad = np.broadcast_to(np.asarray(self.accel_damp_weight, dtype=float), (self.nq_a,))
             _add_term("accel_damp", cp.sum_squares(cp.multiply(np.sqrt(w_ad), dqa - dqa_cv)))
 
-        # Smoothness cost
+        # Smoothness cost. Frame 0 has no previous frame -- q_t_last is the initial guess (a T-pose),
+        # and pulling toward it makes the first solved frame a swing away from it.
         dqa_smooth = q_t_last[self.q_a_indices] - q_a_n_last
-        if np.isscalar(self.smooth_weight):
+        if init_t:
+            pass
+        elif np.isscalar(self.smooth_weight):
             _add_term("smooth_scalar", self.smooth_weight * cp.sum_squares(dqa - dqa_smooth))
         else:
             Wsmooth = np.asarray(self.smooth_weight, dtype=float)

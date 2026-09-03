@@ -784,6 +784,14 @@ def main(cfg: RetargetingConfig) -> None:
         retargeter.smooth_weight = _sv
         logger.info("Root-orientation smoothing weight: %.1f (joints %.2f)", _rootw, float(_sv[7]))
 
+    # uniform velocity smoothing on every actuated joint (the per-joint weights below still override)
+    _jsm = _envf("HCRL_JOINT_SMOOTH", 0.0)
+    if _jsm > 0 and retargeter.q_a_init_idx == -7:
+        if np.isscalar(retargeter.smooth_weight):
+            retargeter.smooth_weight = np.full(retargeter.nq_a, float(retargeter.smooth_weight))
+        retargeter.smooth_weight[7:] = _jsm
+        logger.info("Joint smoothing weight (all actuated): %.1f", _jsm)
+
     # hcrl: the upper-arm twist (T1 Elbow_Pitch) is unobserved by keypoints and flips between the two
     # elbow-swivel solutions in a frame; a per-joint velocity smoothing weight damps that flip.
     _tws = _envf("HCRL_TWIST_SMOOTH", 0.0)
