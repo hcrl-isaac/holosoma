@@ -162,6 +162,10 @@ class InteractionMeshRetargeter:
         self.self_collision_escape = 0.02  # m per SQP iteration a violated pair may separate
         self.self_collision_margin = 0.0  # m; soft repulsion starts here (0 = off)
         self.self_collision_margin_weight = 0.0
+        self.foot_stack_clearance = 0.0  # m of extra vertical gap a crossing foot keeps over the stance foot
+        self.foot_stack_thickness = 0.035  # m; foot body origin to its top surface
+        self.foot_stack_span = 0.20  # m; centre distance below which the feet count as overlapping in plan
+        self.foot_stack_weight = 100.0
         # Per-frame posture cost on the upper-arm twist rows: (T, 2) weights, used when the source elbow is
         # nearly straight and the swivel is undefined, so the twist does not wander into a branch.
         self.twist_prior_seq = None
@@ -1017,6 +1021,25 @@ class InteractionMeshRetargeter:
         if sc_soft:
             _add_term("self_collision_margin", self.self_collision_margin_weight * cp.sum(cp.hstack(sc_soft)))
 
+        # hcrl: FOOT STACKING CLEARANCE. When the feet overlap in plan the crossing foot must clear the
+        # stance foot vertically; the required gap ramps with the overlap, so the foot descends as it
+        # slides off instead of dropping when the contact constraint releases.
+        if self.foot_stack_clearance > 0 and not init_t:
+            ids = [mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, self.task_constants.FOOT_LINKS[s]) for s in ("left", "right")]
+            if min(ids) >= 0:
+                self.robot_data.qpos[:] = q
+                mujoco.mj_forward(self.robot_model, self.robot_data)
+                pl, pr = (self.robot_data.xpos[b].copy() for b in ids)
+                d_xy = float(np.linalg.norm((pl - pr)[:2]))
+                overlap = float(np.clip((self.foot_stack_span - d_xy) / self.foot_stack_span, 0.0, 1.0))
+                if overlap > 0.0:
+                    hi, lo_ = (0, 1) if pl[2] >= pr[2] else (1, 0)
+                    J_hi = self._calc_pos_jacobian(ids[hi])[:, self.q_a_indices]
+                    J_lo = self._calc_pos_jacobian(ids[lo_])[:, self.q_a_indices]
+                    dz_now = float((pl if hi == 0 else pr)[2] - (pr if hi == 0 else pl)[2])
+                    need = self.foot_stack_thickness + overlap * self.foot_stack_clearance
+                    _add_term("foot_stack", self.foot_stack_weight * cp.square(cp.pos(need - (dz_now + (J_hi[2] - J_lo[2]) @ dqa))))
+
         # foot anchor pull (see foot-lock block): heavily weighted so stance feet land and stay planted
         if apply_foot_lock and foot_anchor_terms:
             _add_term("foot_anchor", 200.0 * cp.sum(cp.hstack(foot_anchor_terms)))
@@ -1148,15 +1171,22 @@ class InteractionMeshRetargeter:
                 if mag < 1e-4:
                     continue
                 i_s, i_e, i_w = (robot_link_keys.index(n) for n in names)
-                n_src = np.cross(human_src_pts[i_e] - human_src_pts[i_s], human_src_pts[i_w] - human_src_pts[i_e])
-                if np.linalg.norm(n_src) < 1e-6:
+                u_s, v_s = human_src_pts[i_e] - human_src_pts[i_s], human_src_pts[i_w] - human_src_pts[i_e]
+                n_src = np.cross(u_s, v_s)
+                sin_bend = float(np.linalg.norm(n_src) / (np.linalg.norm(u_s) * np.linalg.norm(v_s) + 1e-9))
+                # the plane is undefined for a straight arm; fade the term in between 15 and 35 deg of bend
+                gate = float(np.clip((sin_bend - np.sin(np.radians(15))) / (np.sin(np.radians(35)) - np.sin(np.radians(15))), 0.0, 1.0))
+                if gate <= 0.0:
                     continue
                 n_tgt = n_src / np.linalg.norm(n_src) * mag  # same bend magnitude, source direction
                 # d(u x v) = [u]x dv - [v]x du, with du = Je - Js, dv = Jw - Je (dqa)
                 def skew(a):
                     return np.array([[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]])
                 dn = skew(u) @ (Jw_ - Je_) - skew(vv) @ (Je_ - Js_)
-                _add_term("arm_plane", self.arm_plane_weight * cp.sum_squares((dn @ dqa + (n_now - n_tgt)) / mag))
+                # normalize by the segment lengths, not |n|: dividing by a near-zero normal made the
+                # term's curvature explode at small bends and the elbow flickered straight/bent
+                scale = float(np.linalg.norm(u) * np.linalg.norm(vv) + 1e-9)
+                _add_term("arm_plane", gate * self.arm_plane_weight * cp.sum_squares((dn @ dqa + (n_now - n_tgt)) / scale))
 
         # hcrl: BALL CLEARANCE. The human is scaled to robot size but the ball is not, so a contact
         # that was tangent for the human lands (1 - scale) * radius inside it -- 33 mm for the T1.
