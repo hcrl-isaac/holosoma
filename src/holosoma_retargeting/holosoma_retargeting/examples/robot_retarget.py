@@ -822,6 +822,18 @@ def main(cfg: RetargetingConfig) -> None:
         retargeter.arm_plane_weight = _apw
         logger.info("Arm-plane term: w=%.1f on %d arms", _apw, len(_tri))
 
+    # shoulder pitch/roll overshoot the source arm's angular rate by ~1.5x on fast arm motion
+    _shs = _envf("HCRL_SHOULDER_SMOOTH", 0.0)
+    if _shs > 0 and retargeter.q_a_init_idx == -7:
+        if np.isscalar(retargeter.smooth_weight):
+            retargeter.smooth_weight = np.full(retargeter.nq_a, float(retargeter.smooth_weight))
+        for _jn in ("Left_Shoulder_Pitch", "Left_Shoulder_Roll", "Right_Shoulder_Pitch", "Right_Shoulder_Roll"):
+            try:
+                retargeter.smooth_weight[retargeter.robot_model.jnt_qposadr[retargeter.robot_model.joint(_jn).id]] = _shs
+            except KeyError:
+                pass
+        logger.info("Shoulder smoothing weight: %.1f", _shs)
+
     _rr = _envf("HCRL_ROOT_RATE_W", 0.0)  # measured: no improvement, off by default
     if _rr > 0 and _root_quat_track is not None:
         retargeter.root_rate_weight = _rr
