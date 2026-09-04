@@ -10,6 +10,7 @@ from holosoma_retargeting.config_types.data_type import MotionDataConfig
 from holosoma_retargeting.config_types.retargeter import RetargeterConfig
 from holosoma_retargeting.config_types.robot import RobotConfig
 from holosoma_retargeting.config_types.task import TaskConfig
+from holosoma_retargeting.config_types.terms import SolverTerms
 
 
 @dataclass
@@ -63,6 +64,12 @@ class RetargetingConfig:
     retargeter: RetargeterConfig = field(default_factory=RetargeterConfig)
     """Retargeter configuration (nested - can override q_a_init_idx, activate_joint_limits, etc.
     via --retargeter.q-a-init-idx)."""
+
+    terms: SolverTerms = field(default_factory=SolverTerms)
+    """Objective weights and switches (nested, e.g. --terms.keypoint-weight 50)."""
+
+    preset: str | None = None
+    """Named set of terms (config_values/presets.py); explicit --terms.* values win over it."""
 
 
 @dataclass

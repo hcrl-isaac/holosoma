@@ -27,6 +27,7 @@ from holosoma_retargeting.config_types.retargeter import RetargeterConfig  # noq
 from holosoma_retargeting.config_types.retargeting import RetargetingConfig  # noqa: E402
 from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
 from holosoma_retargeting.config_types.task import TaskConfig  # noqa: E402
+from holosoma_retargeting.config_types.terms import SolverTerms, resolve_terms  # noqa: E402
 from holosoma_retargeting.hcrl import ball_contact  # noqa: E402
 from holosoma_retargeting.src.interaction_mesh_retargeter import (  # noqa: E402
     InteractionMeshRetargeter,  # type: ignore[import-not-found]
@@ -50,11 +51,6 @@ from holosoma_retargeting.src.utils import (  # noqa: E402
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
-
-
-def _envf(name: str, default: float) -> float:
-    """Float override from the environment (the hcrl prior weights; see the v3 block in main())."""
-    return float(os.environ.get(name, default))
 
 
 # ----------------------------- Constants -----------------------------
@@ -486,6 +482,7 @@ def build_retargeter_kwargs_from_config(
     constants: SimpleNamespace,
     object_urdf_path: str | None,
     task_type: str,
+    terms: SolverTerms | None = None,
 ) -> dict:
     """Build kwargs for InteractionMeshRetargeter from a RetargeterConfig.
     This is a convenience function that allows building kwargs directly from
@@ -516,16 +513,16 @@ def build_retargeter_kwargs_from_config(
     }
     if task_type == "climbing":
         kwargs["nominal_tracking_tau"] = retargeter_config.nominal_tracking_tau
-    # hcrl: body pairs kept apart, e.g. "left_foot_link:right_foot_link,Shank_Left:Shank_Right"; the
-    # non-penetration constraint only ever pairs the robot with the ground/object, so feet may cross.
-    _sc_pairs = os.environ.get("HCRL_SELF_COLLISION", "").strip()
+    # body pairs kept apart; the non-penetration constraint only ever pairs the robot with the
+    # ground/object, so feet may cross without this
+    _sc_pairs = (terms.self_collision if terms is not None else "").strip()
     if _sc_pairs:
         from holosoma_retargeting.config_types.retargeter import SelfCollisionConfig
 
         kwargs["self_collision"] = SelfCollisionConfig(
             enable=True,
             pairs=[tuple(p.split(":")) for p in _sc_pairs.split(",")],
-            tolerance=_envf("HCRL_SELF_COLLISION_TOL", 0.01),
+            tolerance=terms.self_collision_tol,
         )
     return kwargs
 
@@ -707,7 +704,9 @@ def main(cfg: RetargetingConfig) -> None:
     )
 
     # Create retargeter
-    retargeter_kwargs = build_retargeter_kwargs_from_config(cfg.retargeter, constants, object_urdf_path, task_type)
+    terms = resolve_terms(cfg.terms, cfg.preset)
+    logger.info("Solver terms%s: %s", f" (preset {cfg.preset})" if cfg.preset else "", terms)
+    retargeter_kwargs = build_retargeter_kwargs_from_config(cfg.retargeter, constants, object_urdf_path, task_type, terms)
     # hcrl: per-window foot z-lock from precomputed stance windows (see hcrl/stance_windows.py) --
     # xy sticking alone stops skate but nothing pulls a hovering source foot DOWN to the surface.
     _stick_path = data_path / task_name / f"{task_name}_foot_sticking.npz" if task_type == "climbing" else None
@@ -735,35 +734,30 @@ def main(cfg: RetargetingConfig) -> None:
             logger.info("Foot z-lock windows: L %d / R %d", len(_sw["windows_left"]), len(_sw["windows_right"]))
 
     retargeter = InteractionMeshRetargeter(**retargeter_kwargs)
-    # env var so the batch driver can toggle it without threading a flag through the cfg
-    retargeter.limb_retarget = bool(getattr(cfg, "limb_retarget", False)) or os.environ.get(
-        "HOLOSOMA_LIMB_RETARGET", ""
-    ).lower() in ("1", "true", "yes")
+    retargeter.limb_retarget = terms.limb_retarget
     logger.info("Retargeter created")
-    # hcrl ablation toggles: the Cartesian toe-speed guard and the velocity-heuristic foot sticking
-    if os.environ.get("HCRL_TELEPORT_GUARD", "1") in ("0", "false"):
-        retargeter.teleport_guard = False
-    if os.environ.get("HCRL_FOOT_STICKING", "1") in ("0", "false"):
+    retargeter.teleport_guard = terms.teleport_guard
+    if not terms.foot_sticking:
         retargeter.activate_foot_sticking = False
-    # hcrl: the G1 config's hand-tuned regularizers, translated to the T1 (waist posture cost; elbow
-    # flexion capped to the same 2/3 of its range the G1's elbow gets). Off unless asked.
-    if os.environ.get("HCRL_T1_MANUAL", "") in ("1", "true") and robot == "t1":
+    # the G1 config's hand-tuned regularizers, translated to the T1 (waist posture cost; elbow flexion
+    # capped to the same 2/3 of its range the G1's elbow gets)
+    if terms.t1_manual and robot == "t1":
         _rows = retargeter._resolve_joint_rows(("Waist",))
-        retargeter.Q_diag[_rows] = _envf("HCRL_T1_WAIST_COST", 0.2)
+        retargeter.Q_diag[_rows] = terms.waist_cost
         # hip yaw's axis is nearly collinear with the thigh, so keypoints barely observe it; damp it
-        _hy = _envf("HCRL_T1_HIPYAW_COST", 0.0)
+        _hy = terms.hip_yaw_cost
         if _hy > 0:
             retargeter.Q_diag[retargeter._resolve_joint_rows(("Left_Hip_Yaw", "Right_Hip_Yaw"))] = _hy
         # Shoulder_Pitch runs to -190 deg, so a hand in front is also reachable with the arm swung over
         # the back; a posture cost makes that branch pay.
-        _sc = _envf("HCRL_T1_SHOULDER_COST", 0.0)
+        _sc = terms.shoulder_cost
         if _sc > 0:
             retargeter.Q_diag[retargeter._resolve_joint_rows(("Left_Shoulder_Pitch", "Right_Shoulder_Pitch"))] = _sc
         # Elbow_Pitch is the upper-arm twist: same hand position with the elbow apex either way
-        _tw = _envf("HCRL_T1_TWIST_COST", 0.0)
+        _tw = terms.twist_cost
         if _tw > 0:
             retargeter.Q_diag[retargeter._resolve_joint_rows(("Left_Elbow_Pitch", "Right_Elbow_Pitch"))] = _tw
-        _cap = _envf("HCRL_T1_ELBOW_CAP", 1.6)
+        _cap = terms.elbow_cap
         retargeter.q_a_lb[retargeter._resolve_joint_rows(("Left_Elbow_Yaw",))] = -_cap
         retargeter.q_a_ub[retargeter._resolve_joint_rows(("Right_Elbow_Yaw",))] = _cap
         logger.info("T1 manual regularizers: waist cost %.2f, elbow flexion cap %.2f", retargeter.Q_diag[_rows][0], _cap)
@@ -777,7 +771,7 @@ def main(cfg: RetargetingConfig) -> None:
     # nothing at constant velocity, so applying it generally smooths the solve without dragging motion.
     # hcrl: the root's quaternion rows (qpos 3..6) get the same scalar smoothing as a knee, so the
     # torso can swing frame to frame while the joints look smooth. Boost just those rows.
-    _rootw = _envf("HCRL_ROOT_SMOOTH_W", 8.0)
+    _rootw = terms.root_smooth
     if _rootw > 0 and retargeter.q_a_init_idx == -7 and np.isscalar(retargeter.smooth_weight):
         _sv = np.full(retargeter.nq_a, float(retargeter.smooth_weight))
         _sv[3:7] = _rootw
@@ -785,7 +779,7 @@ def main(cfg: RetargetingConfig) -> None:
         logger.info("Root-orientation smoothing weight: %.1f (joints %.2f)", _rootw, float(_sv[7]))
 
     # uniform velocity smoothing on every actuated joint (the per-joint weights below still override)
-    _jsm = _envf("HCRL_JOINT_SMOOTH", 0.0)
+    _jsm = terms.joint_smooth
     if _jsm > 0 and retargeter.q_a_init_idx == -7:
         if np.isscalar(retargeter.smooth_weight):
             retargeter.smooth_weight = np.full(retargeter.nq_a, float(retargeter.smooth_weight))
@@ -794,7 +788,7 @@ def main(cfg: RetargetingConfig) -> None:
 
     # hcrl: the upper-arm twist (T1 Elbow_Pitch) is unobserved by keypoints and flips between the two
     # elbow-swivel solutions in a frame; a per-joint velocity smoothing weight damps that flip.
-    _tws = _envf("HCRL_TWIST_SMOOTH", 0.0)
+    _tws = terms.twist_smooth
     if _tws > 0 and retargeter.q_a_init_idx == -7:
         if np.isscalar(retargeter.smooth_weight):
             retargeter.smooth_weight = np.full(retargeter.nq_a, float(retargeter.smooth_weight))
@@ -806,17 +800,17 @@ def main(cfg: RetargetingConfig) -> None:
         logger.info("Twist-joint smoothing weight: %.1f", _tws)
 
     # self-collision shaping: per-iteration escape cap, soft margin repulsion
-    retargeter.self_collision_escape = _envf("HCRL_SELF_COLLISION_ESCAPE", 0.02)
-    retargeter.self_collision_margin = _envf("HCRL_SELF_COLLISION_MARGIN", 0.0)
-    retargeter.self_collision_margin_weight = _envf("HCRL_SELF_COLLISION_MARGIN_W", 100.0)
-    retargeter.foot_stack_clearance = _envf("HCRL_FOOT_STACK_CLEARANCE", 0.0)
-    retargeter.ground_margin = _envf("HCRL_GROUND_MARGIN", 0.0)
-    retargeter.body_contact_gain = _envf("HCRL_BODY_CONTACT_GAIN", 0.0)
-    retargeter.body_contact_root = _envf("HCRL_BODY_CONTACT_ROOT", 0.0)
-    retargeter.ground_margin_weight = _envf("HCRL_GROUND_MARGIN_W", 200.0)
-    retargeter.foot_stack_weight = _envf("HCRL_FOOT_STACK_W", 100.0)
+    retargeter.self_collision_escape = terms.self_collision_escape
+    retargeter.self_collision_margin = terms.self_collision_margin
+    retargeter.self_collision_margin_weight = terms.self_collision_margin_weight
+    retargeter.foot_stack_clearance = terms.foot_stack_clearance
+    retargeter.foot_stack_weight = terms.foot_stack_weight
+    retargeter.ground_margin = terms.ground_margin
+    retargeter.ground_margin_weight = terms.ground_margin_weight
+    retargeter.body_contact_gain = terms.body_contact_gain
+    retargeter.body_contact_root = terms.body_contact_root
     # straight-arm twist prior: weight fades to zero once the source elbow bends past ~25 deg
-    _tp = _envf("HCRL_STRAIGHT_TWIST_W", 0.0)
+    _tp = terms.straight_twist_weight
     if _tp > 0 and robot == "t1":
         from holosoma_retargeting.hcrl.source_angles import t1_joint_angle_targets as _tja
         _ang = _tja(human_joints)
@@ -825,7 +819,7 @@ def main(cfg: RetargetingConfig) -> None:
         retargeter.twist_rows = [int(retargeter._resolve_joint_rows((n,))[0]) for n in ("Left_Elbow_Pitch", "Right_Elbow_Pitch")]
         logger.info("Straight-arm twist prior: w=%.1f, active on %.0f%% of frames", _tp, 100 * (retargeter.twist_prior_seq > 0).any(1).mean())
 
-    _apw = _envf("HCRL_ARM_PLANE_W", 0.0)
+    _apw = terms.arm_plane_weight
     if _apw > 0:
         _names = list(retargeter.laplacian_match_links.keys())
         _tri = [t for t in (("L_Shoulder", "L_Elbow", "L_Wrist"), ("R_Shoulder", "R_Elbow", "R_Wrist"),
@@ -835,7 +829,7 @@ def main(cfg: RetargetingConfig) -> None:
         logger.info("Arm-plane term: w=%.1f on %d arms", _apw, len(_tri))
 
     # shoulder pitch/roll overshoot the source arm's angular rate by ~1.5x on fast arm motion
-    _shs = _envf("HCRL_SHOULDER_SMOOTH", 0.0)
+    _shs = terms.shoulder_smooth
     if _shs > 0 and retargeter.q_a_init_idx == -7:
         if np.isscalar(retargeter.smooth_weight):
             retargeter.smooth_weight = np.full(retargeter.nq_a, float(retargeter.smooth_weight))
@@ -846,13 +840,13 @@ def main(cfg: RetargetingConfig) -> None:
                 pass
         logger.info("Shoulder smoothing weight: %.1f", _shs)
 
-    _rr = _envf("HCRL_ROOT_RATE_W", 0.0)  # measured: no improvement, off by default
+    _rr = terms.root_rate_weight  # measured: no improvement, off by default
     if _rr > 0 and _root_quat_track is not None:
         retargeter.root_rate_weight = _rr
         retargeter.root_quat_track = _root_quat_track
         logger.info("Root angular-rate prior: w=%.1f over %d frames", _rr, len(_root_quat_track))
 
-    _jaw = _envf("HCRL_JOINT_ANGLE_W", 5.0)
+    _jaw = terms.joint_angle_weight
     if _jaw > 0:
         from holosoma_retargeting.hcrl.source_angles import t1_joint_angle_targets
 
@@ -864,33 +858,30 @@ def main(cfg: RetargetingConfig) -> None:
 
     # debug: record the mapped source points the solver actually optimizes against, so an overlay
     # shows the real targets rather than a reconstruction of them
-    _dump = os.environ.get("HCRL_DUMP_TARGETS", "")
+    _dump = terms.dump_targets
     if _dump:
         retargeter._dump_targets = []
         logger.info("Dumping solver targets to %s", _dump)
 
     # convergence knobs: is the residual under-convergence (helped by more/larger steps) or the cost's
     # own optimum (unchanged by them, meaning the term weights are what to fix)?
-    _ni = int(_envf("HCRL_N_ITER", 0))
+    _ni = int(terms.n_iter)
     if _ni > 0:
         retargeter.solve_n_iter = _ni
-    _ss = _envf("HCRL_STEP_SIZE", 0.0)
+    _ss = terms.step_size
     if _ss > 0:
         retargeter.step_size = _ss
     logger.info("Solve: n_iter=%s step_size=%.2f", _ni or "default", retargeter.step_size)
 
-    retargeter.keypoint_track_weight = _envf("HCRL_KP_W", 0.0)
-    _lw = os.environ.get("HCRL_LAP_W", "")
-    if _lw != "":
-        retargeter.laplacian_weights = float(_lw)
-    retargeter.debug_terms = os.environ.get("HCRL_DEBUG_TERMS", "") in ("1", "true")
+    retargeter.keypoint_track_weight = terms.keypoint_weight
+    if terms.laplacian_weight is not None:
+        retargeter.laplacian_weights = float(terms.laplacian_weight)
+    retargeter.debug_terms = terms.debug_terms
 
-    _ad = os.environ.get("HOLOSOMA_ACCEL_DAMP", "3.0")
-    _sw_env = os.environ.get("HOLOSOMA_SMOOTH_WEIGHT", "")
-    if not retargeter.foot_lock.enable and float(_ad) > 0:
-        retargeter.accel_damp_weight = float(_ad)
-        if _sw_env:
-            retargeter.smooth_weight = float(_sw_env)
+    if not retargeter.foot_lock.enable and terms.accel_damp > 0:
+        retargeter.accel_damp_weight = float(terms.accel_damp)
+        if terms.smooth_weight is not None:
+            retargeter.smooth_weight = float(terms.smooth_weight)
         logger.info(
             "Temporal smoothing: accel_damp=%.2f smooth=%s", retargeter.accel_damp_weight, retargeter.smooth_weight
         )
@@ -898,14 +889,14 @@ def main(cfg: RetargetingConfig) -> None:
     # hcrl: the redundancy priors below are NOT foot-lock specific -- they were gated behind it, so only
     # climbing clips ever got them and every other retarget rode its joint stops with the arm and pelvis
     # parked wherever the null space landed. Applied generally now, still env-overridable.
-    retargeter.joint_limit_barrier_weight = _envf("HCRL_JL_W", 50.0)
-    retargeter.joint_limit_barrier_margin = _envf("HCRL_JL_MARGIN", 0.10)
-    retargeter.joint_limit_barrier_margin_frac = _envf("HCRL_JL_MARGIN_FRAC", 0.15)
-    _jl_joints = os.environ.get("HCRL_JL_JOINTS", "").strip()
+    retargeter.joint_limit_barrier_weight = terms.joint_limit_weight
+    retargeter.joint_limit_barrier_margin = terms.joint_limit_margin
+    retargeter.joint_limit_barrier_margin_frac = terms.joint_limit_margin_frac
+    _jl_joints = terms.joint_limit_joints.strip()
     retargeter.joint_limit_barrier_joints = tuple(_jl_joints.split(",")) if _jl_joints else None
-    retargeter.pelvis_track_weight = _envf("HCRL_PELVIS_W", 5.0)
-    retargeter.arm_reg_weight = _envf("HCRL_ARM_W", 2.0)
-    retargeter.swing_ankle_weight = _envf("HCRL_SWING_ANKLE_W", 0.5)
+    retargeter.pelvis_track_weight = terms.pelvis_weight
+    retargeter.arm_reg_weight = terms.arm_weight
+    retargeter.swing_ankle_weight = terms.swing_ankle_weight
     logger.info(
         "hcrl priors: jl_w=%.1f margin=%.3f/%.2f pelvis=%.1f arm=%.1f swing_ankle=%.2f",
         retargeter.joint_limit_barrier_weight,
@@ -930,7 +921,7 @@ def main(cfg: RetargetingConfig) -> None:
         # riding a stop, so the solve parked joints on their limits (waist_pitch 54% of frames,
         # ankle_roll 35% in `edge`). Barrier keeps a margin; the pelvis/arm priors remove the null
         # spaces that made the solver WANT the stop in the first place. Env-overridable so the weight
-        # ablation sweeps without editing code (HCRL_JL_W=0 HCRL_PELVIS_W=0 ... == the v1 corpus).
+        # ablation sweeps without editing code (--terms.joint-limit-weight 0 --terms.pelvis-weight 0 ... == the v1 corpus).
         logger.info(
             "hcrl v3 priors: jl_w=%.1f margin=%.3f/%.2f pelvis=%.1f arm=%.1f swing_ankle=%.2f",
             retargeter.joint_limit_barrier_weight,
@@ -1002,20 +993,20 @@ def main(cfg: RetargetingConfig) -> None:
         )
 
     retargeter.foot_step_max_seq = toe_step_cap
-    # stance band follows the source toe's own per-frame travel (HCRL_STICK_BAND=0: fixed 1 mm band)
-    if os.environ.get("HCRL_STICK_BAND", "1") not in ("0", "false"):
+    # stance band follows the source toe's own per-frame travel (else a fixed 1 mm band)
+    if terms.stick_band:
         retargeter.stick_tol_seq = np.maximum(_steps, retargeter.foot_sticking_tolerance)
-    retargeter.toe_floor_clamp = os.environ.get("HCRL_TOE_CLAMP", "1") not in ("0", "false")
+    retargeter.toe_floor_clamp = terms.toe_clamp
     _map_names = list(retargeter.laplacian_match_links.keys())
     retargeter.toe_kp_indices = [_map_names.index(t) for t in toe_names if t in _map_names]
     retargeter.hip_kp_indices = [_map_names.index(n) for n in ("L_Hip", "R_Hip") if n in _map_names] or None
     retargeter.ankle_kp_indices = [_map_names.index(n) for n in ("L_Ankle", "R_Ankle") if n in _map_names] or None
-    retargeter.foot_min_sep = _envf("HCRL_FOOT_MIN_SEP", 0.0)
+    retargeter.foot_min_sep = terms.foot_min_sep
     _ankles = [n for n in ("L_Ankle", "R_Ankle", "LeftFoot", "RightFoot") if n in retargeter.demo_joints]
     if len(_ankles) == 2:
         retargeter.ankle_kp_cols = np.array([retargeter.demo_joints.index(n) for n in _ankles])
     # hcrl: source foot heading from the ankle->toe direction, for the retargeter's foot-yaw term
-    _fyw = _envf("HCRL_FOOT_YAW_W", 2.0)
+    _fyw = terms.foot_yaw_weight
     _ankle_names = [n for n in ("L_Ankle", "R_Ankle", "LeftFoot", "RightFoot") if n in retargeter.demo_joints]
     if _fyw > 0 and len(_ankle_names) == 2:
         _ai = [retargeter.demo_joints.index(n) for n in _ankle_names]
@@ -1037,8 +1028,8 @@ def main(cfg: RetargetingConfig) -> None:
         if sole_normal is not None:
             # The SMPL-derived sole normal reads 5-15 deg toe-up while the foot is planted, and the
             # sole term follows it. Remove each foot's planted-frame median pitch about its lateral
-            # axis (HCRL_SOLE_PLANTED=calib), or force planted soles flat (=flat), or leave it (=off).
-            _mode = os.environ.get("HCRL_SOLE_PLANTED", "calib")
+            # axis (calib), or force planted soles flat (flat), or leave it (off).
+            _mode = terms.sole_planted
             if _mode != "off" and source_npz_height is not None:
                 sole_normal = np.array(sole_normal, dtype=np.float64)
                 _pl = (source_npz_height[: len(human_joints)] * smpl_scale) < 0.03
@@ -1062,11 +1053,11 @@ def main(cfg: RetargetingConfig) -> None:
                         logger.info("Sole-normal calibration: foot %d planted median pitch %.1f deg removed", _kk, np.degrees(_bias))
                 sole_normal /= np.linalg.norm(sole_normal, axis=-1, keepdims=True) + 1e-9
             retargeter.sole_normal_seq = sole_normal
-            retargeter.sole_normal_weight = _envf("HCRL_SOLE_W", 5.0)
+            retargeter.sole_normal_weight = terms.sole_weight
             # heights are source-scale like the keypoints, so they need the same smpl_scale; the
             # clamp keeps a noisy source frame from ever commanding the sole below the floor
             retargeter.sole_height_seq = np.maximum(source_npz_height * smpl_scale, 0.0)
-            retargeter.sole_height_weight = _envf("HCRL_SOLE_Z_W", 2000.0)
+            retargeter.sole_height_weight = terms.sole_height_weight
             tilt = np.degrees(np.arccos(np.clip(sole_normal[..., 2], -1.0, 1.0)))
             logger.info("Sole-orientation matching: weight %.1f, source tilt median %.1f deg",
                         retargeter.sole_normal_weight, float(np.median(tilt)))
@@ -1074,7 +1065,7 @@ def main(cfg: RetargetingConfig) -> None:
         # hcrl: the SMPL toe joint sits 3-6 cm above the sole where the robot's toe sphere is the sole,
         # so a planted source foot asks the robot foot to hover. Measure the planted-frame median toe
         # height and let the retargeter drop the whole target by it (after any limb rescale).
-        if os.environ.get("HCRL_FOOT_KP_CALIB", "") in ("1", "true") and source_npz_height is not None:
+        if terms.foot_calib and source_npz_height is not None:
             planted = (source_npz_height[: len(human_joints)] * smpl_scale) < 0.03
             _rm, _rd = retargeter.robot_model, retargeter.robot_data
             _rd.qpos[:] = 0.0
@@ -1112,10 +1103,10 @@ def main(cfg: RetargetingConfig) -> None:
             retargeter.ball_foot_points = ball_contact.foot_surface_points(
                 retargeter.robot_model, constants.FOOT_LINKS
             )
-            retargeter.ball_weight = _envf("HCRL_BALL_W", 2000.0)
+            retargeter.ball_weight = terms.ball_weight
             if ball_gap is not None:
                 retargeter.ball_clearance_seq = ball_contact.target_clearance(
-                    ball_gap.astype(np.float64), _envf("HCRL_BALL_BAND", ball_contact.BALL_CLEARANCE_BAND_M)
+                    ball_gap.astype(np.float64), terms.ball_band if terms.ball_band is not None else ball_contact.BALL_CLEARANCE_BAND_M
                 )
             tracked = np.isfinite(retargeter.ball_seq).all(axis=1)
             logger.info("Ball clearance: weight %.0f, radius %.3f m, source clearance %s, %.0f%% of frames tracked",
@@ -1124,7 +1115,7 @@ def main(cfg: RetargetingConfig) -> None:
                         100 * float(tracked.mean()))
             # hcrl: optionally HOLD the entry distance r0 through each detected dribble contact -- the
             # clearance cost alone cannot beat ~50 mm of solver noise, the hard radial band can.
-            if os.environ.get("HCRL_BALL_CONSTRAINT", "") in ("1", "true"):
+            if terms.ball_constraint:
                 _segs = []
                 # J_OC_dict in the solver is keyed by SOURCE keypoint names, not robot links
                 for _toe_j, _toe_link in ((10, "L_Foot"), (11, "R_Foot")):
@@ -1170,8 +1161,8 @@ def main(cfg: RetargetingConfig) -> None:
         original=not cfg.augmentation,
         dest_res_path=dest_res_path,
     )
-    if os.environ.get("HCRL_DUMP_TARGETS", ""):
-        np.save(os.environ["HCRL_DUMP_TARGETS"], np.asarray(retargeter._dump_targets))
+    if terms.dump_targets:
+        np.save(terms.dump_targets, np.asarray(retargeter._dump_targets))
         logger.info("Wrote %d target frames", len(retargeter._dump_targets))
     logger.info("Retargeting complete. Results saved to: %s", dest_res_path)
 

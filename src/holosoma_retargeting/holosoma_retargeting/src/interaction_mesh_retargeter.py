@@ -980,8 +980,8 @@ class InteractionMeshRetargeter:
         # bodies other than the feet touching the ground: a body lying on the floor is held by many
         # contacts against targets it cannot reach, and the root rocks as the active set switches
         n_body_ground = sum(
-            1 for key in phis
-            if any("ground" in self._geom_names[g] for g in key) and not any("foot" in self._geom_names[g] for g in key)
+            1 for key, phi in phis.items()
+            if phi < 0.01 and any("ground" in self._geom_names[g] for g in key) and not any("foot" in self._geom_names[g] for g in key)
         )
         contact_gain = 1.0 + self.body_contact_gain * n_body_ground
         for key, phi in phis.items():
