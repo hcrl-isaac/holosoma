@@ -843,6 +843,7 @@ class InteractionMeshRetargeter:
 
         # Constraints list
         constraints = []
+        guard_constraints = []
 
         if use_lap:
             L = calculate_laplacian_matrix(vertices, adj_list)  # (V x V), EXPECT SPARSE OR SMALL
@@ -884,10 +885,11 @@ class InteractionMeshRetargeter:
                     already = p_WF_dict[key] - p_last_all[key]  # displacement accrued at linearization pt
                     Jc = J_WF[:3, self.q_a_indices]
                     for axis in range(3):
-                        constraints += [
+                        guard_constraints += [
                             Jc[axis] @ dqa >= -step_max - already[axis],
                             Jc[axis] @ dqa <= step_max - already[axis],
                         ]
+                    constraints += guard_constraints[-6:]
 
             # Foot sticking: constrain XY to stay near previous frame position
             if apply_foot_sticking:
@@ -1373,6 +1375,15 @@ class InteractionMeshRetargeter:
             constraints = [c for c in constraints if not isinstance(c, cp.constraints.second_order.SOC)]
             problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints)
             problem.solve(solver=cp.CLARABEL, **solver_kwargs)
+
+        # a foot still deep in the floor after the init frame must escape faster than the guard allows;
+        # yield the guard for this iteration rather than abort (never reached when the QP is feasible)
+        if (problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE)) and guard_constraints:
+            guard_ids = {id(c) for c in guard_constraints}
+            problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), [c for c in constraints if id(c) not in guard_ids])
+            problem.solve(solver=cp.CLARABEL, **solver_kwargs)
+            if problem.status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
+                print(f"[teleport-guard] frame {frame_idx}: infeasible with the foot step cap, solved without it")
 
         if problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
             # hcrl debug: report which hard constraints are already violated at dqa = 0
