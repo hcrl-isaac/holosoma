@@ -813,7 +813,7 @@ def main(cfg: RetargetingConfig) -> None:
     _tp = terms.straight_twist_weight
     if _tp > 0 and robot == "t1":
         from holosoma_retargeting.hcrl.source_angles import t1_joint_angle_targets as _tja
-        _ang = _tja(human_joints)
+        _ang = _tja(human_joints, data_format)
         _bend = np.stack([np.abs(_ang["Left_Elbow_Yaw"]), np.abs(_ang["Right_Elbow_Yaw"])], 1)
         retargeter.twist_prior_seq = _tp * np.clip(1.0 - np.degrees(_bend) / 25.0, 0.0, 1.0)
         retargeter.twist_rows = [int(retargeter._resolve_joint_rows((n,))[0]) for n in ("Left_Elbow_Pitch", "Right_Elbow_Pitch")]
@@ -851,7 +851,7 @@ def main(cfg: RetargetingConfig) -> None:
         from holosoma_retargeting.hcrl.source_angles import t1_joint_angle_targets
 
         retargeter.joint_angle_weight = _jaw
-        retargeter.joint_angle_targets = t1_joint_angle_targets(human_joints)
+        retargeter.joint_angle_targets = t1_joint_angle_targets(human_joints, data_format)
         _m = {k: float(np.abs(v).mean()) for k, v in retargeter.joint_angle_targets.items()}
         logger.info("Joint-angle tracking w=%.1f, source |angle| means: %s", _jaw,
                     {k: round(v, 2) for k, v in _m.items()})
