@@ -32,8 +32,9 @@ def bvh_joint_names(bvh_path: Path) -> list[str]:
     return names
 
 
-def to_holosoma(positions: np.ndarray, names: list[str], start_s: float | None = None,
-                end_s: float | None = None) -> np.ndarray:
+def to_holosoma(
+    positions: np.ndarray, names: list[str], start_s: float | None = None, end_s: float | None = None
+) -> np.ndarray:
     """Reorder, un-mirror and crop one take.
 
     Args:
