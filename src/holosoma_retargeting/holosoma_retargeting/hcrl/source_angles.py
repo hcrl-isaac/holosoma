@@ -9,9 +9,19 @@ from __future__ import annotations
 
 import numpy as np
 
+from holosoma_retargeting.config_types.data_type import LAFAN_DEMO_JOINTS
+
 # SMPL body joint indices
 SMPL = {"L_Sho": 16, "L_Elb": 18, "L_Wri": 20, "R_Sho": 17, "R_Elb": 19, "R_Wri": 21,
         "L_Hip": 1, "L_Kne": 4, "L_Ank": 7, "R_Hip": 2, "R_Kne": 5, "R_Ank": 8}
+# the same joints in the LAFAN skeleton, by name in its keypoint order
+LAFAN = {key: LAFAN_DEMO_JOINTS.index(name) for key, name in (
+    ("L_Sho", "LeftArm"), ("L_Elb", "LeftForeArm"), ("L_Wri", "LeftHand"),
+    ("R_Sho", "RightArm"), ("R_Elb", "RightForeArm"), ("R_Wri", "RightHand"),
+    ("L_Hip", "LeftUpLeg"), ("L_Kne", "LeftLeg"), ("L_Ank", "LeftFoot"),
+    ("R_Hip", "RightUpLeg"), ("R_Kne", "RightLeg"), ("R_Ank", "RightFoot"),
+)}
+SKELETONS = {"smplh": SMPL, "smplx": SMPL, "lafan": LAFAN}
 
 
 def _bend(p: np.ndarray, a: int, b: int, c: int) -> np.ndarray:
@@ -32,16 +42,19 @@ def _bend(p: np.ndarray, a: int, b: int, c: int) -> np.ndarray:
     return np.arccos(np.clip(cos, -1.0, 1.0))
 
 
-def t1_joint_angle_targets(joints: np.ndarray) -> dict[str, np.ndarray]:
+def t1_joint_angle_targets(joints: np.ndarray, data_format: str = "smplx") -> dict[str, np.ndarray]:
     """Target angles for T1's flexion hinges, signed to match each joint's own range.
 
     Args:
         joints: ``(T, J, 3)`` source joint positions, any consistent scale.
+        data_format: Source skeleton, one of ``SKELETONS``.
 
     Returns:
         Mapping of T1 joint name to a ``(T,)`` target angle track.
     """
-    s = SMPL
+    if data_format not in SKELETONS:
+        raise ValueError(f"no joint-angle map for data format {data_format!r}; known: {sorted(SKELETONS)}")
+    s = SKELETONS[data_format]
     l_elb = _bend(joints, s["L_Sho"], s["L_Elb"], s["L_Wri"])
     r_elb = _bend(joints, s["R_Sho"], s["R_Elb"], s["R_Wri"])
     l_kne = _bend(joints, s["L_Hip"], s["L_Kne"], s["L_Ank"])

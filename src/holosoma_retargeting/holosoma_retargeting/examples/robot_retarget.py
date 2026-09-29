@@ -760,7 +760,10 @@ def main(cfg: RetargetingConfig) -> None:
         _cap = terms.elbow_cap
         retargeter.q_a_lb[retargeter._resolve_joint_rows(("Left_Elbow_Yaw",))] = -_cap
         retargeter.q_a_ub[retargeter._resolve_joint_rows(("Right_Elbow_Yaw",))] = _cap
-        logger.info("T1 manual regularizers: waist cost %.2f, elbow flexion cap %.2f", retargeter.Q_diag[_rows][0], _cap)
+        _knee = retargeter._resolve_joint_rows(("Left_Knee_Pitch", "Right_Knee_Pitch"))
+        retargeter.q_a_ub[_knee] = np.minimum(retargeter.q_a_ub[_knee], terms.knee_cap)
+        logger.info("T1 manual regularizers: waist cost %.2f, elbow flexion cap %.2f, knee flexion cap %.2f",
+                    retargeter.Q_diag[_rows][0], _cap, terms.knee_cap)
 
     # hcrl: anti-oscillation damping when stance windows are active -- with the toe anchored and
     # sole-sphere XY stuck, the lateral-lean null space is near-tied and flips at 15 Hz (ankle-roll
@@ -813,7 +816,7 @@ def main(cfg: RetargetingConfig) -> None:
     _tp = terms.straight_twist_weight
     if _tp > 0 and robot == "t1":
         from holosoma_retargeting.hcrl.source_angles import t1_joint_angle_targets as _tja
-        _ang = _tja(human_joints)
+        _ang = _tja(human_joints, data_format)
         _bend = np.stack([np.abs(_ang["Left_Elbow_Yaw"]), np.abs(_ang["Right_Elbow_Yaw"])], 1)
         retargeter.twist_prior_seq = _tp * np.clip(1.0 - np.degrees(_bend) / 25.0, 0.0, 1.0)
         retargeter.twist_rows = [int(retargeter._resolve_joint_rows((n,))[0]) for n in ("Left_Elbow_Pitch", "Right_Elbow_Pitch")]
@@ -851,7 +854,13 @@ def main(cfg: RetargetingConfig) -> None:
         from holosoma_retargeting.hcrl.source_angles import t1_joint_angle_targets
 
         retargeter.joint_angle_weight = _jaw
-        retargeter.joint_angle_targets = t1_joint_angle_targets(human_joints)
+        retargeter.joint_angle_targets = t1_joint_angle_targets(human_joints, data_format)
+        # no keypoint observes the head (neck and head joints lie on its axis); lafan_source writes its angles
+        _head = Path(data_path) / f"{task_name}_head.npy"
+        if data_format == "lafan" and robot == "t1" and _head.exists():
+            _yaw_pitch = np.load(_head)
+            retargeter.joint_angle_targets["AAHead_yaw"] = _yaw_pitch[:, 0]
+            retargeter.joint_angle_targets["Head_pitch"] = _yaw_pitch[:, 1]
         _m = {k: float(np.abs(v).mean()) for k, v in retargeter.joint_angle_targets.items()}
         logger.info("Joint-angle tracking w=%.1f, source |angle| means: %s", _jaw,
                     {k: round(v, 2) for k, v in _m.items()})
