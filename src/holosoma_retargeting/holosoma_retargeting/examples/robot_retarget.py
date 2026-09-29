@@ -760,7 +760,10 @@ def main(cfg: RetargetingConfig) -> None:
         _cap = terms.elbow_cap
         retargeter.q_a_lb[retargeter._resolve_joint_rows(("Left_Elbow_Yaw",))] = -_cap
         retargeter.q_a_ub[retargeter._resolve_joint_rows(("Right_Elbow_Yaw",))] = _cap
-        logger.info("T1 manual regularizers: waist cost %.2f, elbow flexion cap %.2f", retargeter.Q_diag[_rows][0], _cap)
+        _knee = retargeter._resolve_joint_rows(("Left_Knee_Pitch", "Right_Knee_Pitch"))
+        retargeter.q_a_ub[_knee] = np.minimum(retargeter.q_a_ub[_knee], terms.knee_cap)
+        logger.info("T1 manual regularizers: waist cost %.2f, elbow flexion cap %.2f, knee flexion cap %.2f",
+                    retargeter.Q_diag[_rows][0], _cap, terms.knee_cap)
 
     # hcrl: anti-oscillation damping when stance windows are active -- with the toe anchored and
     # sole-sphere XY stuck, the lateral-lean null space is near-tied and flips at 15 Hz (ankle-roll
