@@ -852,6 +852,12 @@ def main(cfg: RetargetingConfig) -> None:
 
         retargeter.joint_angle_weight = _jaw
         retargeter.joint_angle_targets = t1_joint_angle_targets(human_joints, data_format)
+        # no keypoint observes the head (neck and head joints lie on its axis); lafan_source writes its angles
+        _head = Path(data_path) / f"{task_name}_head.npy"
+        if data_format == "lafan" and robot == "t1" and _head.exists():
+            _yaw_pitch = np.load(_head)
+            retargeter.joint_angle_targets["AAHead_yaw"] = _yaw_pitch[:, 0]
+            retargeter.joint_angle_targets["Head_pitch"] = _yaw_pitch[:, 1]
         _m = {k: float(np.abs(v).mean()) for k, v in retargeter.joint_angle_targets.items()}
         logger.info("Joint-angle tracking w=%.1f, source |angle| means: %s", _jaw,
                     {k: round(v, 2) for k, v in _m.items()})

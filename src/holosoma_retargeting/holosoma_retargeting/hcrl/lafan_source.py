@@ -55,6 +55,51 @@ def to_holosoma(positions: np.ndarray, names: list[str], start_s: float | None =
     return out[a:b]
 
 
+def head_angles(bvh_path: Path) -> np.ndarray:
+    """The head's yaw and pitch relative to the chest, as T1's ``AAHead_yaw`` and ``Head_pitch`` targets.
+
+    Keypoint positions cannot carry this: Neck and Head lie on the neck axis, so turning the head moves
+    neither. The BVH's rotations do. Needs the LAFAN1 ``lafan1`` reader package on the path.
+
+    Args:
+        bvh_path: The take's BVH file.
+
+    Returns:
+        ``(T, 2)`` yaw (positive = turn left) and pitch (positive = nod down) in radians.
+    """
+    from lafan1 import extract, utils  # type: ignore[import-not-found]
+    from scipy.spatial.transform import Rotation
+
+    anim = extract.read_bvh(str(bvh_path))
+    grot, gpos = utils.quat_fk(anim.quats, anim.pos, anim.parents)
+    names = [ALIASES.get(n, n) for n in anim.bones]
+    idx = {n: names.index(n) for n in ("Hips", "LeftUpLeg", "LeftFoot", "LeftToeBase", "Spine2", "Head")}
+    # anatomical axes from the rest skeleton (all local rotations zero): forward along the toes, up the spine
+    rest = np.zeros_like(anim.offsets)
+    for j, p in enumerate(anim.parents):
+        rest[j] = anim.offsets[j] if p < 0 else rest[p] + anim.offsets[j]
+    up = rest[idx["Head"]] - rest[idx["Hips"]]
+    up /= np.linalg.norm(up)
+    fwd = rest[idx["LeftToeBase"]] - rest[idx["LeftFoot"]]
+    fwd -= np.dot(fwd, up) * up
+    fwd /= np.linalg.norm(fwd)
+    left = np.cross(up, fwd)
+    if np.dot(rest[idx["LeftUpLeg"]] - rest[idx["Hips"]], left) <= 0:
+        raise ValueError("the rest skeleton's left hip is not on its left; the BVH is mirrored")
+    basis = np.stack([fwd, left, up], axis=1)
+    rot = Rotation.from_quat(grot[..., [1, 2, 3, 0]].reshape(-1, 4)).as_matrix().reshape(*grot.shape[:2], 3, 3)
+    # the reader's quaternions must reproduce its own FK positions, or the layout above is wrong
+    child, parent = idx["Head"], anim.parents[idx["Head"]]
+    fk = gpos[:, parent] + np.einsum("tij,j->ti", rot[:, parent], anim.offsets[child])
+    if not np.allclose(fk, gpos[:, child], atol=1e-3):
+        raise ValueError("BVH quaternion layout does not reproduce the reader's FK")
+    rel = np.einsum("tji,tjk->tik", rot[:, idx["Spine2"]], rot[:, idx["Head"]])
+    anat = np.einsum("ji,tjk,kl->til", basis, rel, basis)
+    yaw = np.arctan2(anat[:, 1, 0], anat[:, 0, 0])
+    pitch = np.arcsin(np.clip(-anat[:, 2, 0], -1.0, 1.0))
+    return np.stack([yaw, pitch], axis=1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--bvh-dir", type=Path, required=True)
@@ -71,7 +116,10 @@ def main() -> None:
         stem = take if not window else f"{take}_{window[0]}-{window[1]}s"
         out = to_holosoma(positions, names, start_s, end_s)
         np.save(args.out_dir / f"{stem}.npy", out)
-        print(f"wrote {stem}.npy: {out.shape[0]} frames ({out.shape[0] / FPS:.1f} s)")
+        a = 0 if start_s is None else round(start_s * FPS)
+        head = head_angles(args.bvh_dir / f"{take}.bvh")[a : a + len(out)]
+        np.save(args.out_dir / f"{stem}_head.npy", head)
+        print(f"wrote {stem}.npy: {out.shape[0]} frames ({out.shape[0] / FPS:.1f} s), head yaw/pitch sidecar")
 
 
 if __name__ == "__main__":
