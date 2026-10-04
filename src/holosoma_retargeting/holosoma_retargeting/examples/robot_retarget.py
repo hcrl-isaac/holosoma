@@ -776,13 +776,8 @@ def main(cfg: RetargetingConfig) -> None:
         _cap = terms.elbow_cap
         retargeter.q_a_lb[retargeter._resolve_joint_rows(("Left_Elbow_Yaw",))] = -_cap
         retargeter.q_a_ub[retargeter._resolve_joint_rows(("Right_Elbow_Yaw",))] = _cap
-        _knee = retargeter._resolve_joint_rows(("Left_Knee_Pitch", "Right_Knee_Pitch"))
-        retargeter.q_a_ub[_knee] = np.minimum(retargeter.q_a_ub[_knee], terms.knee_cap)
         logger.info(
-            "T1 manual regularizers: waist cost %.2f, elbow flexion cap %.2f, knee flexion cap %.2f",
-            retargeter.Q_diag[_rows][0],
-            _cap,
-            terms.knee_cap,
+            "T1 manual regularizers: waist cost %.2f, elbow flexion cap %.2f", retargeter.Q_diag[_rows][0], _cap
         )
 
     # the root quaternion rows (qpos 3..6) otherwise get a knee's scalar smoothing, which lets the torso
