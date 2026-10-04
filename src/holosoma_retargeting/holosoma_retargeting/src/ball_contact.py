@@ -41,7 +41,7 @@ def foot_surface_points(model: mujoco.MjModel, foot_links: dict[str, str], voxel
         body_id = model.body(link).id
         meshes = []
         for geom in range(model.ngeom):
-            if model.geom_bodyid[geom] != body_id or model.geom_type[geom] != mujoco.mjtGeom.mjGEOM_MESH:
+            if model.geom_bodyid[geom] != body_id or int(model.geom_type[geom]) != mujoco.mjtGeom.mjGEOM_MESH:
                 continue
             mesh = model.geom_dataid[geom]
             adr, num = model.mesh_vertadr[mesh], model.mesh_vertnum[mesh]

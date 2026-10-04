@@ -641,6 +641,7 @@ class InteractionMeshRetargeter:
         """
         human_joint_motions = self._apply_limb_retarget(human_joint_motions)
         self._warn_inert_terms()
+        self._check_velocity_map()
 
         num_frames = human_joint_motions.shape[0]
         if isinstance(object_points_local_demo, list):
@@ -1506,6 +1507,19 @@ class InteractionMeshRetargeter:
         """
         return mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, name)
 
+    def _check_velocity_map(self) -> None:
+        """Raise if a hinge or slide joint has no entry in the qdot -> qvel map, which would freeze it."""
+        m = self.robot_model
+        movable = (mujoco.mjtJoint.mjJNT_HINGE, mujoco.mjtJoint.mjJNT_SLIDE)
+        rows = self._build_transform_qdot_to_qvel_fast()
+        frozen = [
+            mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, j)
+            for j in range(m.njnt)
+            if int(m.jnt_type[j]) in movable and not rows[m.jnt_dofadr[j]].any()
+        ]
+        if frozen:
+            raise RuntimeError(f"qdot -> qvel map leaves {len(frozen)} joints frozen, e.g. {frozen[:3]}")
+
     def _warn_inert_terms(self) -> None:
         """Log each positive-weight term whose bodies, keypoints or joints this robot and source lack."""
         links = self.task_constants.SOLE_LINKS
@@ -2063,7 +2077,7 @@ class InteractionMeshRetargeter:
 
         # ---- root free joint (assumed joint 0) ----
         j0 = 0
-        assert self.robot_model.jnt_type[j0] == mujoco.mjtJoint.mjJNT_FREE
+        assert int(self.robot_model.jnt_type[j0]) == mujoco.mjtJoint.mjJNT_FREE
         qadr = self.robot_model.jnt_qposadr[j0]  # 0
         dadr = self.robot_model.jnt_dofadr[j0]  # 0
 
@@ -2095,7 +2109,7 @@ class InteractionMeshRetargeter:
 
         # ---- FREE joint #1 (human/root): use model addresses, but this should be the first joint ----
         j_free1 = 0
-        assert self.robot_model.jnt_type[j_free1] == mujoco.mjtJoint.mjJNT_FREE
+        assert int(self.robot_model.jnt_type[j_free1]) == mujoco.mjtJoint.mjJNT_FREE
         qadr1 = int(self.robot_model.jnt_qposadr[j_free1])  # expect 0
         dadr1 = int(self.robot_model.jnt_dofadr[j_free1])  # start of its 6 qvel dofs
 
@@ -2109,7 +2123,9 @@ class InteractionMeshRetargeter:
             # ---- FREE joint #2 (object): assume it's the last FREE joint; fill its 6x7 block ----
             # Find it by type (safer than hardcoding tail indices)
             free_joints = [
-                j for j in range(self.robot_model.njnt) if self.robot_model.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE
+                j
+                for j in range(self.robot_model.njnt)
+                if int(self.robot_model.jnt_type[j]) == mujoco.mjtJoint.mjJNT_FREE
             ]
             assert len(free_joints) >= 2, "Expected two FREE joints (human + object)."
             j_free2 = free_joints[1]  # second FREE joint
@@ -2123,7 +2139,7 @@ class InteractionMeshRetargeter:
 
         # ---- remaining hinge/slide joints: v = qdot ----
         for j in range(1, self.robot_model.njnt):
-            jt = self.robot_model.jnt_type[j]
+            jt = int(self.robot_model.jnt_type[j])
             if jt in (mujoco.mjtJoint.mjJNT_HINGE, mujoco.mjtJoint.mjJNT_SLIDE):
                 qa = self.robot_model.jnt_qposadr[j]
                 da = self.robot_model.jnt_dofadr[j]

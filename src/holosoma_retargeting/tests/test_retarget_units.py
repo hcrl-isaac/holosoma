@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import mujoco
 import numpy as np
@@ -13,6 +14,7 @@ from holosoma_retargeting.config_types.robot import RobotConfig
 from holosoma_retargeting.config_types.terms import SolverTerms, preset_terms
 from holosoma_retargeting.data_utils import amass_source, smpl_fk
 from holosoma_retargeting.src import stance_windows
+from holosoma_retargeting.src.interaction_mesh_retargeter import InteractionMeshRetargeter
 from holosoma_retargeting.src.limb_retarget import rescale_to_robot_limbs
 from holosoma_retargeting.src.source_angles import t1_joint_angle_targets
 
@@ -140,3 +142,26 @@ def test_t1_flexion_is_capped_at_the_urdf_limit(joint, side, limit):
     adr = int(model.jnt_qposadr[model.joint(joint).id])
     assert bounds[str(adr)] == pytest.approx(limit)
     assert abs(model.jnt_range[model.joint(joint).id][side]) > abs(limit)
+
+
+def _t1_solver_stub(**extra):
+    model = mujoco.MjModel.from_xml_path(str(T1_MODEL))
+    data = mujoco.MjData(model)
+    data.qpos[:] = model.qpos0
+    return SimpleNamespace(robot_model=model, robot_data=data, has_dynamic_object=False, **extra)
+
+
+def test_the_velocity_map_moves_every_t1_hinge():
+    stub = _t1_solver_stub()
+    rows = InteractionMeshRetargeter._build_transform_qdot_to_qvel_fast(stub)
+    model = stub.robot_model
+    hinges = [j for j in range(model.njnt) if int(model.jnt_type[j]) == mujoco.mjtJoint.mjJNT_HINGE]
+    assert len(hinges) == 23
+    assert all(rows[model.jnt_dofadr[j], model.jnt_qposadr[j]] == 1.0 for j in hinges)
+
+
+def test_a_frozen_velocity_map_raises():
+    stub = _t1_solver_stub()
+    stub._build_transform_qdot_to_qvel_fast = lambda: np.zeros((stub.robot_model.nv, stub.robot_model.nq))
+    with pytest.raises(RuntimeError, match="frozen"):
+        InteractionMeshRetargeter._check_velocity_map(stub)

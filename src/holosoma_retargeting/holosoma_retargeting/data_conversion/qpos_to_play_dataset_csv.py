@@ -25,7 +25,7 @@ def joint_names(model: mujoco.MjModel) -> list[str]:
     """
     names = []
     for j in range(model.njnt):
-        if model.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE:
+        if int(model.jnt_type[j]) == mujoco.mjtJoint.mjJNT_FREE:
             continue
         names.append(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j))
     return names

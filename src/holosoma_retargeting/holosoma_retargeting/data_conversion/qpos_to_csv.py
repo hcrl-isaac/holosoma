@@ -40,7 +40,9 @@ def qpos_to_csv(qpos: np.ndarray, model: mujoco.MjModel, columns: list[str], up:
     joints_model = PchipInterpolator(t, qpos[:, 7:])(t_hi)
 
     # model hinge order -> csv column order
-    model_joints = [model.joint(j).name for j in range(model.njnt) if model.joint(j).type != mujoco.mjtJoint.mjJNT_FREE]
+    model_joints = [
+        model.joint(j).name for j in range(model.njnt) if int(model.jnt_type[j]) != mujoco.mjtJoint.mjJNT_FREE
+    ]
     joint_cols = columns[7:]
     idx = [model_joints.index(c) for c in joint_cols]
     return pd.DataFrame(np.concatenate([pos, quat, joints_model[:, idx]], axis=1), columns=columns)
