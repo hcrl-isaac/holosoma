@@ -66,7 +66,7 @@ class SolverTerms:
     elbow_cap: float = 1.6
     """Elbow flexion cap (rad) under ``t1_manual``; the joint range is 2.44."""
     knee_cap: float = 2.34
-    """Knee flexion cap (rad) under ``t1_manual``; holosoma's T1 model allows 2.34, ``t1.urdf`` allows 2.18."""
+    """Knee flexion cap (rad) under ``t1_manual``; it only tightens the robot config's 2.18 bound."""
     straight_twist_weight: float = 0.0
     """Posture cost on the upper-arm twist while the source elbow is nearly straight."""
 
