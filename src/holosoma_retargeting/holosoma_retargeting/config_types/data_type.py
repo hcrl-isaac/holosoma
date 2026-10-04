@@ -339,16 +339,6 @@ JOINTS_MAPPINGS = {
     },
 }
 
-# Data format specific constants
-# Source keypoint used as the pelvis/root reference (q_init + eval); "Spine1" is the mocap/lafan name.
-ROOT_KEYPOINT_BY_FORMAT = {
-    "lafan": "Spine1",
-    "smplh": "Pelvis",
-    "mocap": "Spine1",
-    "smplx": "Pelvis",
-    "g1fk": "pelvis_contour_link",
-}
-
 
 def root_keypoint(demo_joints: list) -> str:
     """The root/pelvis keypoint present in this joint list (format-agnostic lookup)."""

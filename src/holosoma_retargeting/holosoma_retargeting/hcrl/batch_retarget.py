@@ -31,7 +31,6 @@ from holosoma_retargeting.hcrl.csv_to_g1fk import DEFAULT_MODEL, fk_positions, q
 from holosoma_retargeting.hcrl.qpos_to_csv import qpos_to_csv
 
 PKG = Path(__file__).resolve().parents[1]
-COURT_REMAP = {"stairs_r013": "stairs_env"}  # stairs stage rebuilt the court under a new name
 
 
 def prep_clip(csv_path: Path, court: dict, court_boxes: np.ndarray, seq_dir: Path, model: mujoco.MjModel,
@@ -41,7 +40,7 @@ def prep_clip(csv_path: Path, court: dict, court_boxes: np.ndarray, seq_dir: Pat
     np.save(seq_dir / f"{seq_dir.name}_q0.npy", qpos_row(model, csv_path))
     courts_to_scene.build_court_files(court, seq_dir, robot_xml)
     src = np.load(seq_dir / f"{seq_dir.name}.npy")[:: stance_windows.DOWNSAMPLE]
-    masks, wl, wr = stance_windows.compute(src, court_boxes, 0.04, 0.09, 0.15, 2)
+    masks, wl, wr = stance_windows.compute(src, court_boxes, 0.15)
     np.savez(
         seq_dir / f"{seq_dir.name}_foot_sticking.npz",
         sticking=masks,
@@ -109,7 +108,6 @@ def main() -> None:
     courts = json.loads(Path(args.courts_json).read_text())["courts"]
     man = pd.read_csv(args.manifest)
     man["stem"] = man["move_g1_path"].map(lambda p: Path(p).stem)
-    man["court"] = man["court"].map(lambda c: COURT_REMAP.get(c, c))
     rows = man[man["court"].isin(set(courts) if args.courts is None else set(args.courts))]
     csv_dir = Path(args.csv_dir)
     work = Path(args.work_root)

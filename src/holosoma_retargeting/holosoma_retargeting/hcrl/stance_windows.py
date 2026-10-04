@@ -1,19 +1,14 @@
-"""Robust stance windows for g1fk sources: position+height rule + a locomotion support invariant.
+"""Stance windows for g1fk sources: a support-state labeling against the terrain under each toe.
 
 The stock detector (source toe xy-speed < 1 cm/s) finds nothing on IK-retargeted sources whose stance
-feet skate at 1-5 cm/s. This computes, on the 30 fps source the solver sees:
+feet skate at 1-5 cm/s. On the 30 fps source the solver sees, this labels every frame both / left /
+right / flight with a Viterbi pass whose emissions are toe heights above the terrain (court cuboids +
+ground) and whose switching penalty keeps a noisy foot in its current state.
 
-1. Per-toe stance candidates: in-window travel < ``disp_tol`` AND toe within ``height_tol`` of the
-   terrain surface under it (court cuboids + ground) -- Rempe-style position+height.
-2. Support invariant: any frame where NEITHER foot qualifies and the clip is not truly airborne
-   (best toe clearance < ``flight_tol``) gets its better-grounded foot forced into stance -- for
-   locomotion at least one foot is in contact at all times, even when the dirty source hovers.
-3. Contiguous stance runs become z-lock windows ``(start, end, z_anchor)`` where the anchor is the
-   window's surface height plus the clip's own calibrated toe-center offset -- the constraint that
-   actually pulls a hovering source foot DOWN onto the terrain (xy sticking alone cannot).
-
+Each stance run becomes a 3D anchor window ``(start, end, x, y, z)``: xy where the source foot plants,
+z the surface there plus the clip's calibrated toe offset, which pulls a hovering foot down onto it.
 Saved as ``<seq_dir>/<stem>_foot_sticking.npz``: ``sticking`` (T, 2) bool for xy-stick, plus
-``windows_left`` / ``windows_right`` float arrays (n, 5): (start, end, x, y, z) source anchors for the retargeter's per-window foot z-lock.
+``windows_left`` / ``windows_right`` (n, 5) float arrays.
 """
 
 import argparse
@@ -38,50 +33,17 @@ def terrain_z(xy: np.ndarray, boxes: np.ndarray) -> np.ndarray:
     return np.where(np.isfinite(z), z, 0.0)
 
 
-def _still_mask(toe: np.ndarray, disp_tol: float, half_win: int) -> np.ndarray:
-    t_n = len(toe)
-    still = np.zeros(t_n, dtype=bool)
-    for t in range(t_n):
-        lo, hi = max(0, t - half_win), min(t_n, t + half_win + 1)
-        seg = toe[lo:hi]
-        still[t] = float(np.linalg.norm(seg - seg.mean(0), axis=1).max()) < disp_tol
-    return still
+def compute(src: np.ndarray, boxes: np.ndarray, flight_tol: float) -> tuple[np.ndarray, list, list]:
+    """Stance masks and per-foot anchor windows for one source clip.
 
+    Args:
+        src: ``(T, J, 3)`` g1fk keypoints at the solver rate.
+        boxes: ``(N, 6)`` court cuboids as center xyz + size xyz.
+        flight_tol: Lowest toe clearance (m) above which a frame may be labelled flight.
 
-def _smooth(mask: np.ndarray, min_run: int = 3, max_gap: int = 2) -> np.ndarray:
-    """Close short gaps, then drop runs shorter than min_run."""
-    m = mask.copy()
-    t_n = len(m)
-    # close gaps
-    t = 0
-    while t < t_n:
-        if not m[t] and t > 0 and m[t - 1]:
-            g = t
-            while g < t_n and not m[g]:
-                g += 1
-            if g < t_n and (g - t) <= max_gap:
-                m[t:g] = True
-            t = g
-        else:
-            t += 1
-    # drop short runs
-    t = 0
-    while t < t_n:
-        if m[t]:
-            e = t
-            while e + 1 < t_n and m[e + 1]:
-                e += 1
-            if (e - t + 1) < min_run:
-                m[t : e + 1] = False
-            t = e + 1
-        else:
-            t += 1
-    return m
-
-
-def compute(src: np.ndarray, boxes: np.ndarray, disp_tol: float, height_tol: float, flight_tol: float,
-            half_win: int) -> tuple[np.ndarray, list, list]:
-    """Stance masks (T, 2) + per-foot z-lock windows [(start, end, z_anchor)] for one source clip."""
+    Returns:
+        ``(T, 2)`` stance masks [left, right] and each foot's ``[start, end, x, y, z]`` windows.
+    """
     toe_idx = [G1FK_DEMO_JOINTS.index(n) for n in TOE_NAMES_BY_FORMAT["g1fk"]]
     toes = src[:, toe_idx]  # (T, 2, 3)
     surf = np.stack([terrain_z(toes[:, k, :2], boxes) for k in range(2)], axis=1)  # (T, 2)
@@ -158,10 +120,7 @@ def main() -> None:
     ap.add_argument("--seq_dirs", nargs="+", required=True, help="Seq dir(s) holding <stem>.npy sources.")
     ap.add_argument("--courts_json", required=True)
     ap.add_argument("--court", required=True)
-    ap.add_argument("--disp_tol", type=float, default=0.04, help="Max in-window travel (m) for stance.")
-    ap.add_argument("--height_tol", type=float, default=0.09, help="Max toe clearance (m) for stance.")
     ap.add_argument("--flight_tol", type=float, default=0.15, help="Min best-toe clearance (m) for true flight.")
-    ap.add_argument("--half_win", type=int, default=2, help="Half window (solver frames, 30 fps).")
     args = ap.parse_args()
 
     court = json.loads(Path(args.courts_json).read_text())["courts"][args.court]
@@ -169,7 +128,7 @@ def main() -> None:
     for d in args.seq_dirs:
         seq = Path(d)
         src = np.load(seq / f"{seq.name}.npy")[::DOWNSAMPLE]
-        masks, wl, wr = compute(src, boxes, args.disp_tol, args.height_tol, args.flight_tol, args.half_win)
+        masks, wl, wr = compute(src, boxes, args.flight_tol)
         np.savez(
             seq / f"{seq.name}_foot_sticking.npz",
             sticking=masks,
