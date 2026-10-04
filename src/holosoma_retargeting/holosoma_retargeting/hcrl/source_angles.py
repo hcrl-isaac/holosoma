@@ -9,19 +9,45 @@ from __future__ import annotations
 
 import numpy as np
 
-from holosoma_retargeting.config_types.data_type import LAFAN_DEMO_JOINTS
+from holosoma_retargeting.config_types.data_type import LAFAN_DEMO_JOINTS, SMPLH_DEMO_JOINTS, SMPLX_DEMO_JOINTS
 
-# SMPL body joint indices
-SMPL = {"L_Sho": 16, "L_Elb": 18, "L_Wri": 20, "R_Sho": 17, "R_Elb": 19, "R_Wri": 21,
-        "L_Hip": 1, "L_Kne": 4, "L_Ank": 7, "R_Hip": 2, "R_Kne": 5, "R_Ank": 8}
-# the same joints in the LAFAN skeleton, by name in its keypoint order
-LAFAN = {key: LAFAN_DEMO_JOINTS.index(name) for key, name in (
-    ("L_Sho", "LeftArm"), ("L_Elb", "LeftForeArm"), ("L_Wri", "LeftHand"),
-    ("R_Sho", "RightArm"), ("R_Elb", "RightForeArm"), ("R_Wri", "RightHand"),
-    ("L_Hip", "LeftUpLeg"), ("L_Kne", "LeftLeg"), ("L_Ank", "LeftFoot"),
-    ("R_Hip", "RightUpLeg"), ("R_Kne", "RightLeg"), ("R_Ank", "RightFoot"),
-)}
-SKELETONS = {"smplh": SMPL, "smplx": SMPL, "lafan": LAFAN}
+_SMPL_NAMES = (
+    ("L_Sho", "L_Shoulder"),
+    ("L_Elb", "L_Elbow"),
+    ("L_Wri", "L_Wrist"),
+    ("R_Sho", "R_Shoulder"),
+    ("R_Elb", "R_Elbow"),
+    ("R_Wri", "R_Wrist"),
+    ("L_Hip", "L_Hip"),
+    ("L_Kne", "L_Knee"),
+    ("L_Ank", "L_Ankle"),
+    ("R_Hip", "R_Hip"),
+    ("R_Kne", "R_Knee"),
+    ("R_Ank", "R_Ankle"),
+)
+_LAFAN_NAMES = (
+    ("L_Sho", "LeftArm"),
+    ("L_Elb", "LeftForeArm"),
+    ("L_Wri", "LeftHand"),
+    ("R_Sho", "RightArm"),
+    ("R_Elb", "RightForeArm"),
+    ("R_Wri", "RightHand"),
+    ("L_Hip", "LeftUpLeg"),
+    ("L_Kne", "LeftLeg"),
+    ("L_Ank", "LeftFoot"),
+    ("R_Hip", "RightUpLeg"),
+    ("R_Kne", "RightLeg"),
+    ("R_Ank", "RightFoot"),
+)
+# each format's keypoint indices by joint name: smplh (InterMimic) and smplx order their joints differently
+SKELETONS = {
+    fmt: {key: joints.index(name) for key, name in names}
+    for fmt, joints, names in (
+        ("smplh", SMPLH_DEMO_JOINTS, _SMPL_NAMES),
+        ("smplx", SMPLX_DEMO_JOINTS, _SMPL_NAMES),
+        ("lafan", LAFAN_DEMO_JOINTS, _LAFAN_NAMES),
+    )
+}
 
 
 def _bend(p: np.ndarray, a: int, b: int, c: int) -> np.ndarray:
