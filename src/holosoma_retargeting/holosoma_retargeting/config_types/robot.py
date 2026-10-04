@@ -263,6 +263,9 @@ class RobotConfig:
                     "35": 0.05,
                 }
             )
+        elif self.robot_type == "t1":
+            # the deployed t1.urdf limits knee flexion to 2.18; the bundled model allows 2.34
+            base.update({"21": 2.18, "27": 2.18})  # left, right knee pitch
 
         return base
 
