@@ -63,8 +63,8 @@ class SolverTerms:
     hip_yaw_cost: float = 0.0
     shoulder_cost: float = 0.0
     twist_cost: float = 0.0
-    elbow_cap: float = 1.6
-    """Elbow flexion cap (rad) under ``t1_manual``; the joint range is 2.44."""
+    elbow_cap: float | None = None
+    """Elbow flexion cap (rad) under ``t1_manual`` that only tightens the robot config's 2.27; None keeps it."""
     straight_twist_weight: float = 0.0
     """Posture cost on the upper-arm twist while the source elbow is nearly straight."""
 

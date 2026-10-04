@@ -30,7 +30,6 @@ PRESETS: dict[str, dict] = {
         joint_angle_weight=20.0,
         root_smooth=20.0,
         accel_damp=3.0,
-        elbow_cap=2.44,
         body_contact_gain=1.5,
     ),
     # interaction mesh only, with posture priors, for manipulation corpora (OMOMO)
@@ -46,5 +45,6 @@ PRESETS: dict[str, dict] = {
         accel_damp=0.0,
         arm_plane_weight=0.5,
         body_contact_root=60.0,
+        elbow_cap=1.6,
     ),
 }
