@@ -57,3 +57,4 @@ src/holosoma_retargeting/holosoma_retargeting/models/vacuum/
 src/holosoma_retargeting/holosoma_retargeting/models/whitechair/
 src/holosoma_retargeting/holosoma_retargeting/models/woodchair/
 src/holosoma_retargeting/holosoma_retargeting/models/t1/t1_23dof_w_*.xml
+!src/holosoma_retargeting/holosoma_retargeting/models/t1/t1_23dof_w_largebox.xml
