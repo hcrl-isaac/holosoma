@@ -864,7 +864,7 @@ def main(cfg: RetargetingConfig) -> None:
     if _jaw > 0 and robot == "t1":
         retargeter.joint_angle_weight = _jaw
         retargeter.joint_angle_targets = t1_joint_angle_targets(human_joints, retargeter.demo_joints)
-        # no keypoint observes the head (neck and head joints lie on its axis); lafan_source writes its angles
+        # no keypoint observes the head (its joints lie on the neck axis), so lafan_source writes its angles
         _head = Path(data_path) / f"{task_name}_head.npy"
         if data_format == "lafan" and _head.exists():
             _yaw_pitch = np.load(_head)
