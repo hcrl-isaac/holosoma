@@ -178,7 +178,8 @@ def main() -> None:
         rec = {"stem": stem, "court": court_name, "rc": rc, "cost": cost, "support": None, "max_air_s": None, "out": ""}
         npz = save_dir / f"{stem}_original.npz"
         if rc == 0 and npz.exists():
-            q = np.load(npz, allow_pickle=True)["qpos"]
+            with np.load(npz, allow_pickle=True) as result:
+                q = result["qpos"]
             boxes = np.array([[*p["pos"], *p["size"]] for p in courts[court_name]["prims"]], dtype=np.float64)
             rec["support"], rec["max_air_s"] = support_coverage(q, boxes, model)
             if columns is None:

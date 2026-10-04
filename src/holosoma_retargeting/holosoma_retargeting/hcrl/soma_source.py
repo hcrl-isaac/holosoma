@@ -202,17 +202,18 @@ def main() -> None:
     ap.add_argument("--robot_xml", default=str(DEFAULT_ROBOT_XML))
     args = ap.parse_args()
 
-    d = np.load(args.npz, allow_pickle=True)
-    pos, names = d["pos"], [str(n) for n in d["names"]]
-    scale = args.scale if args.scale is not None else G1_HEIGHT / float(d["human_height"])
+    with np.load(args.npz, allow_pickle=True) as d:
+        pos, names = d["pos"], [str(n) for n in d["names"]]
+        human_height = float(d["human_height"])
+    scale = args.scale if args.scale is not None else G1_HEIGHT / human_height
     src = soma_keypoints(pos, names, scale)
 
     seq_dir = Path(args.out_root) / args.stem
     seq_dir.mkdir(parents=True, exist_ok=True)
     np.save(seq_dir / f"{args.stem}.npy", src)
 
-    hm = np.load(args.heightmap)
-    prims = heightmap_to_prims(hm["grid"], hm["origin"], float(hm["resolution"]))
+    with np.load(args.heightmap) as hm:
+        prims = heightmap_to_prims(hm["grid"], hm["origin"], float(hm["resolution"]))
     for p in prims:  # uniform scale about the world origin, same as the source keypoints
         p["pos"] = [round(v * scale, 4) for v in p["pos"]]
         p["size"] = [round(v * scale, 4) for v in p["size"]]

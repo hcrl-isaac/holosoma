@@ -1112,7 +1112,7 @@ def main(cfg: RetargetingConfig) -> None:
                 "Ball clearance: weight %.0f, radius %.3f m, source clearance %s, %.0f%% of frames tracked",
                 retargeter.ball_weight,
                 retargeter.ball_radius,
-                "yes" if ball_gap is not None else "MISSING (non-penetration only)",
+                "yes" if ball_gap is not None else "missing (non-penetration only)",
                 100 * float(tracked.mean()),
             )
             # optionally hold the entry distance through each detected dribble contact with a hard radial

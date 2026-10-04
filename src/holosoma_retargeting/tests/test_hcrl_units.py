@@ -31,8 +31,8 @@ def test_to_z_up_is_a_rotation_taking_y_up_to_z_up():
 
 def test_resample_picks_nearest_frames():
     values = np.arange(10.0)
-    assert amass_source._resample(values, 30.0, 30.0) is values
-    np.testing.assert_array_equal(amass_source._resample(values, 60.0, 30.0), [0, 2, 4, 6, 8])
+    assert amass_source.resample(values, 30.0, 30.0) is values
+    np.testing.assert_array_equal(amass_source.resample(values, 60.0, 30.0), [0, 2, 4, 6, 8])
 
 
 @pytest.mark.parametrize("key", amass_source.FRAME_RATE_KEYS)

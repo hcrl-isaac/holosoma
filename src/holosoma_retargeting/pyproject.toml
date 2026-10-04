@@ -38,6 +38,8 @@ dependencies = [
     "clarabel==0.11.1",
     "libigl",
     "tyro",
+    "joblib",
+    "pandas",
 ]
 
 [project.optional-dependencies]
