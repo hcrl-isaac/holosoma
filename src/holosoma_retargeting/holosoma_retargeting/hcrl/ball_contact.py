@@ -128,7 +128,7 @@ def ball_gaps(
             continue
         data.qpos[:] = row
         mujoco.mj_forward(model, data)
-        for k, (side, body_id) in enumerate(zip(sides, ids, strict=True)):
+        for k, (side, body_id) in enumerate(zip(sides, ids)):
             pts = data.xpos[body_id] + foot_points[side] @ data.xmat[body_id].reshape(3, 3).T
             gaps[t, k] = np.linalg.norm(pts - centre, axis=1).min() - radius
     return gaps
@@ -148,10 +148,8 @@ def ball_score(gaps: np.ndarray, targets: np.ndarray | None = None) -> dict[str,
     """
     keep = np.isfinite(gaps).any(axis=1)
     if not keep.any():
-        return dict.fromkeys(
-            ("ball_frames", "ball_closest_gap_m", "ball_penetration_frac", "ball_deficit_m", "ball_deficit_frac"),
-            float("nan"),
-        ) | {"ball_frames": 0.0}
+        keys = ("ball_closest_gap_m", "ball_penetration_frac", "ball_deficit_m", "ball_deficit_frac")
+        return {"ball_frames": 0.0, **dict.fromkeys(keys, float("nan"))}
     per_frame = np.nanmin(gaps[keep], axis=1)
     want = np.zeros_like(gaps) if targets is None else np.asarray(targets, dtype=float)
     deficit = np.nanmax(np.maximum(want[keep] - gaps[keep], 0.0), axis=1)

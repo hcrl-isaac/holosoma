@@ -34,8 +34,8 @@ def _install_chumpy_shim() -> None:
             return np.asarray(self.__dict__.get("x"), dtype=dtype)
 
     pkg, mod = types.ModuleType("chumpy"), types.ModuleType("chumpy.ch")
-    mod.Ch = Ch
-    pkg.ch = mod
+    setattr(mod, "Ch", Ch)  # noqa: B010
+    setattr(pkg, "ch", mod)  # noqa: B010
     sys.modules.setdefault("chumpy", pkg)
     sys.modules["chumpy.ch"] = mod
 

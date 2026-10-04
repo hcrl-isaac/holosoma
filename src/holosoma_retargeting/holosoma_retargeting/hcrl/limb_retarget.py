@@ -126,7 +126,7 @@ def rescale_to_robot_limbs(
     """
     idx = {n: i for i, n in enumerate(names)}
     rigid = rigid or dict.fromkeys(names, True)
-    horizontal = set(horizontal or ())
+    horizontal_set = set(horizontal or ())
     out = keypoints.copy()
     ordered, seen = [], set()
 
@@ -151,7 +151,7 @@ def rescale_to_robot_limbs(
         norm = np.linalg.norm(d, axis=-1, keepdims=True)
         unit = np.divide(d, norm, out=np.zeros_like(d), where=norm > 1e-9)
         target = np.full_like(norm, length[n]) if rigid.get(n, True) else np.minimum(norm, length[n])
-        if n in horizontal:
+        if n in horizontal_set:
             dz = np.clip(d[:, 2:3], -target, target)
             xy_norm = np.linalg.norm(d[:, :2], axis=-1, keepdims=True)
             xy_unit = np.divide(d[:, :2], xy_norm, out=np.zeros_like(d[:, :2]), where=xy_norm > 1e-9)

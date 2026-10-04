@@ -118,28 +118,30 @@ class InteractionMeshRetargeter:
         self.smplh_mapped_joint_indices = [self.demo_joints.index(name) for name in self.laplacian_match_links]
 
         # Setup weights and parameters
-        self.laplacian_weights = 10
+        self.laplacian_weights: float = 10
         self.smooth_weight = 0.2
         self.accel_damp_weight = 0.0  # acceleration damping: zero-cost at constant velocity (anti-oscillation)
-        self.foot_step_max_seq = None  # optional (T, 2) [left, right] per-frame toe-step caps (flight phases)
+        self.foot_step_max_seq: np.ndarray | None = (
+            None  # optional (T, 2) [left, right] per-frame toe-step caps (flight phases)
+        )
         # Teleporting feet are excluded by bounding Cartesian toe speed, which depends on neither
         # terrain nor contact detection -- so it is not tied to foot_lock.
         self.teleport_guard = True
         # Source sole-plane normals (T, 2, 3) for [left, right], which pin the foot pitch/roll that the
         # mapped ankle and toe points leave free.
-        self.sole_normal_seq = None
+        self.sole_normal_seq: np.ndarray | None = None
         self.sole_normal_weight = 0.0
         # Source sole ground heights (T, 2), since flattening a sole alone lifts it off the ground.
-        self.sole_height_seq = None
+        self.sole_height_seq: np.ndarray | None = None
         self.sole_height_weight = 0.0
         self.sole_planted_height = 0.03
         self._sole_body_id_cache: dict[str, list[int]] = {}
         self._foot_geoms: frozenset[int] | None = None
         # Solver-frame centres (T, 3) of an object that does not scale with the human (NaN where absent),
         # and the foot surface points kept out of it.
-        self.ball_seq = None
-        self.ball_clearance_seq = None  # (T, 2) [left, right] clearance each foot must keep from it
-        self.ball_foot_points = None
+        self.ball_seq: np.ndarray | None = None
+        self.ball_clearance_seq: np.ndarray | None = None  # (T, 2) [left, right] clearance each foot must keep from it
+        self.ball_foot_points: dict[str, np.ndarray] | None = None
         self.ball_radius = 0.0
         self.ball_weight = 0.0
         self.foot_orient_weight = 0.0  # stance-engagement foot angular-rate damping (0 = off, see _foot_orient_damp)
@@ -147,24 +149,40 @@ class InteractionMeshRetargeter:
         self.joint_limit_barrier_margin = 0.0  # absolute cap (rad), 0 disables the barrier
         self.joint_limit_barrier_margin_frac = 0.15  # and never more than this fraction of the range
         self.joint_limit_barrier_min_range = 0.15  # rad, a narrower range is a deliberate clamp and is skipped
-        self.joint_limit_barrier_joints = None  # optional (name, ...): barrier only these joints
+        self.joint_limit_barrier_joints: tuple[str, ...] | None = (
+            None  # optional (name, ...): barrier only these joints
+        )
         self.pelvis_track_weight = 0.0  # source-pelvis position prior (kills the pelvis<->waist null space)
         self.arm_reg_weight = 0.0  # source-arm position prior (stops the solver parking a redundant arm)
         self.joint_angle_weight = 0.0  # track source anatomical joint angles, not just keypoint positions
         self.keypoint_track_weight = 0.0  # absolute position prior on every mapped keypoint
-        self.ball_track = None  # (T, 3) ball positions in the solve frame (scaled + shifted)
-        self.ball_contacts = ()  # tuples (toe_link_name, start, end, r0) in solve scale
+        self.ball_track: np.ndarray | None = None  # (T, 3) ball positions in the solve frame (scaled + shifted)
+        self.ball_contacts: tuple[
+            tuple[str, int, int, float], ...
+        ] = ()  # tuples (toe_link_name, start, end, r0) in solve scale
         self.ball_tolerance = 0.005  # m, slack either side of r0
-        self.joint_angle_targets = None  # {joint name: (T,) target angle in rad}
+        self.joint_angle_targets: dict[str, np.ndarray] | None = None  # {joint name: (T,) target angle in rad}
         self.swing_ankle_weight = 0.0  # neutral-ankle prior while a foot is in free swing
         # Source foot heading (T, 2) [left, right], rad about +z: an ankle and a toe point leave the
         # sole's yaw to a 0.13 m lever, so the robot foot's own forward axis is steered to it.
-        self.foot_yaw_seq = None
+        self.foot_yaw_seq: np.ndarray | None = None
         self.foot_yaw_weight = 0.0
-        self.toe_kp_indices = None  # positions of the toe keypoints in the joint mapping (ground anchoring)
-        self.hip_kp_indices = None  # (left, right) hip keypoint positions in the mapping (lateral axis)
-        self.ankle_kp_indices = None
+        self.toe_kp_indices: list[int] | None = (
+            None  # positions of the toe keypoints in the joint mapping (ground anchoring)
+        )
+        self.hip_kp_indices: list[int] | None = (
+            None  # (left, right) hip keypoint positions in the mapping (lateral axis)
+        )
+        self.ankle_kp_indices: list[int] | None = None
         self.foot_min_sep = 0.0  # minimum lateral toe separation (m) the targets are widened to
+        self.ankle_kp_cols: np.ndarray | None = None  # (left, right) ankle columns in the source joints
+        self.ground_kp_offset = 0.0  # planted toe target height above the robot toe (m)
+        self.limb_retarget = False  # rescale source keypoints to the robot's segment lengths
+        self.toe_floor_clamp = True  # never command a toe target below the sole on flat ground
+        self.solve_n_iter = 0  # SQP iterations per frame, 0 = the solver's default
+        self.debug_terms = False  # log each objective term's value every debug_terms_every frames
+        self.debug_terms_every = 25
+        self._dump_targets: list | None = None  # per-frame solver targets, when dumping them
         self.self_collision_escape = 0.02  # m per SQP iteration a violated pair may separate
         self.self_collision_margin = 0.0  # soft repulsion starts inside this distance (m, 0 = off)
         self.self_collision_margin_weight = 0.0
@@ -179,15 +197,15 @@ class InteractionMeshRetargeter:
         self.foot_stack_weight = 100.0
         # Per-frame posture cost on the upper-arm twist rows: (T, 2) weights, used when the source elbow is
         # nearly straight and the swivel is undefined, so the twist does not wander into a branch.
-        self.twist_prior_seq = None
-        self.twist_rows = None
+        self.twist_prior_seq: np.ndarray | None = None
+        self.twist_rows: list[int] | None = None
         # Arm-plane matching: (shoulder, elbow, wrist) keypoint-name triples whose plane normal is
         # steered to the source's, which fixes the elbow swivel branch without a joint target.
-        self.arm_plane_triples = ()
+        self.arm_plane_triples: tuple[tuple[str, str, str], ...] = ()
         self.arm_plane_weight = 0.0
         # Tolerance for foot sticking constraints in x, y.
         self.foot_sticking_tolerance = foot_sticking_tolerance
-        self.stick_tol_seq = None  # optional (T, 2) per-frame [left, right] sticking band, metres
+        self.stick_tol_seq: np.ndarray | None = None  # optional (T, 2) per-frame [left, right] sticking band, metres
         self._init_foot_lock(foot_lock)
         self._self_collision_config = self_collision
 
@@ -892,7 +910,7 @@ class InteractionMeshRetargeter:
         # Foot constraints (sticking + foot lock window Z pinning)
         apply_foot_sticking = (self.q_a_init_idx < 12) and self.activate_foot_sticking
         apply_foot_lock = (self.q_a_init_idx < 12) and self.foot_lock.enable
-        foot_anchor_terms = []
+        foot_anchor_terms: list = []
         foot_orient_terms = []
         if apply_foot_sticking or apply_foot_lock:
             J_WF_dict, p_WF_dict, _ = self._calc_manipulator_jacobians(q, links=self.foot_links, obj_frame=False)
@@ -1206,17 +1224,17 @@ class InteractionMeshRetargeter:
         # Arm plane: the upper-arm twist is unobserved by positions, so match the shoulder-elbow-wrist plane
         # normal to the source's (relative shape only, no joint target).
         if self.arm_plane_weight > 0 and human_src_pts is not None and self.arm_plane_triples:
-            for names in self.arm_plane_triples:
-                if not all(n in J_OC_dict for n in names):
+            for triple in self.arm_plane_triples:
+                if not all(n in J_OC_dict for n in triple):
                     continue
-                s_, e_, w_ = (p_OC_dict[n] for n in names)
-                Js_, Je_, Jw_ = (J_OC_dict[n] for n in names)
+                s_, e_, w_ = (p_OC_dict[n] for n in triple)
+                Js_, Je_, Jw_ = (J_OC_dict[n] for n in triple)
                 u, vv = e_ - s_, w_ - e_
                 n_now = np.cross(u, vv)
                 mag = float(np.linalg.norm(n_now))
                 if mag < 1e-4:
                     continue
-                i_s, i_e, i_w = (robot_link_keys.index(n) for n in names)
+                i_s, i_e, i_w = (robot_link_keys.index(n) for n in triple)
                 u_s, v_s = human_src_pts[i_e] - human_src_pts[i_s], human_src_pts[i_w] - human_src_pts[i_e]
                 n_src = np.cross(u_s, v_s)
                 sin_bend = float(np.linalg.norm(n_src) / (np.linalg.norm(u_s) * np.linalg.norm(v_s) + 1e-9))
@@ -1257,6 +1275,7 @@ class InteractionMeshRetargeter:
                     continue
                 rot = self._body_rot(q, bid)
                 origin = self.robot_data.xpos[bid].astype(np.float64)
+                assert self.ball_foot_points is not None, "ball_seq is set without ball_foot_points"
                 points = origin + self.ball_foot_points[side] @ rot.T
                 offset = points - centre
                 dist = np.maximum(np.linalg.norm(offset, axis=1), 1e-9)

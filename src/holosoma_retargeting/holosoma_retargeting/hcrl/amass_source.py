@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
 import joblib
@@ -297,9 +298,9 @@ def iter_clips(root: Path) -> list[tuple[str, Callable[[], dict]]]:
         ``(name, load)`` pairs, where ``load()`` returns that sequence's dict.
     """
     if root.is_file():
-        return [(str(seq["seq_name"]), lambda seq=seq: seq) for seq in joblib.load(root).values()]
+        return [(str(seq["seq_name"]), partial(dict, seq)) for seq in joblib.load(root).values()]
     paths = sorted(p for p in root.rglob("*.npz") if not p.name.startswith("shape"))
-    return [("_".join(p.relative_to(root).with_suffix("").parts), lambda p=p: _load_npz(p)) for p in paths]
+    return [("_".join(p.relative_to(root).with_suffix("").parts), partial(_load_npz, p)) for p in paths]
 
 
 def _vote_sample(raw: dict) -> tuple | None:
@@ -372,7 +373,8 @@ def main() -> None:
         raise ValueError("the corpus votes x-up, which no conversion here handles; pass --up-axis y or z")
     rotate = axis == 1
 
-    written, skipped, rates = [], 0, {}
+    written, skipped = [], 0
+    rates: dict[float, int] = {}
     for name, load in clips:
         try:
             meta = convert_clip(

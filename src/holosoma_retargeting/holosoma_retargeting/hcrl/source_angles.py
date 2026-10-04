@@ -52,7 +52,7 @@ def t1_joint_angle_targets(joints: np.ndarray, demo_joints: Sequence[str]) -> di
     index = {name: i for i, name in enumerate(demo_joints)}
     targets = {}
     for t1_joint, (chain, sign) in T1_HINGES.items():
-        found = [next((index[n] for n in spellings if n in index), None) for spellings in chain]
-        if None not in found:
+        found = [next((index[n] for n in spellings if n in index), -1) for spellings in chain]
+        if min(found) >= 0:
             targets[t1_joint] = sign * _bend(joints, *found)
     return targets

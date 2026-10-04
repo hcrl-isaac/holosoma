@@ -530,12 +530,12 @@ def build_retargeter_kwargs_from_config(
     # body pairs kept apart, since the non-penetration constraint only pairs the robot with the ground or
     # object and the feet could otherwise cross
     _sc_pairs = (terms.self_collision if terms is not None else "").strip()
-    if _sc_pairs:
+    if terms is not None and _sc_pairs:
         from holosoma_retargeting.config_types.retargeter import SelfCollisionConfig
 
         kwargs["self_collision"] = SelfCollisionConfig(
             enable=True,
-            pairs=[tuple(p.split(":")) for p in _sc_pairs.split(",")],
+            pairs=[(a, b) for a, b in (p.split(":") for p in _sc_pairs.split(","))],
             tolerance=terms.self_collision_tol,
         )
     return kwargs
@@ -1169,7 +1169,7 @@ def main(cfg: RetargetingConfig) -> None:
         original=not cfg.augmentation,
         dest_res_path=dest_res_path,
     )
-    if terms.dump_targets:
+    if terms.dump_targets and retargeter._dump_targets is not None:
         np.save(terms.dump_targets, np.asarray(retargeter._dump_targets))
         logger.info("Wrote %d target frames", len(retargeter._dump_targets))
     logger.info("Retargeting complete. Results saved to: %s", dest_res_path)
