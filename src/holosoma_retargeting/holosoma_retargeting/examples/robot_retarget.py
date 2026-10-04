@@ -7,6 +7,7 @@ Unified robot retargeting script for all task types:
 
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 import sys
@@ -27,7 +28,7 @@ from holosoma_retargeting.config_types.retargeter import RetargeterConfig  # noq
 from holosoma_retargeting.config_types.retargeting import RetargetingConfig  # noqa: E402
 from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
 from holosoma_retargeting.config_types.task import TaskConfig  # noqa: E402
-from holosoma_retargeting.config_types.terms import SolverTerms, resolve_terms  # noqa: E402
+from holosoma_retargeting.config_types.terms import SolverTerms, preset_terms  # noqa: E402
 from holosoma_retargeting.hcrl import ball_contact  # noqa: E402
 from holosoma_retargeting.hcrl.source_angles import t1_joint_angle_targets  # noqa: E402
 from holosoma_retargeting.src.interaction_mesh_retargeter import (  # noqa: E402
@@ -184,9 +185,6 @@ def create_ground_points(x_range: tuple[float, float], y_range: tuple[float, flo
     return np.stack([X.flatten(), Y.flatten(), np.zeros_like(X.flatten())], axis=1)
 
 
-_root_quat_track = None
-
-
 def load_motion_data(
     task_type: TaskType,
     data_format: str,
@@ -214,7 +212,6 @@ def load_motion_data(
     Raises:
         FileNotFoundError: If required data files are not found
     """
-    global _root_quat_track
     logger.info("Loading motion data for task: %s, format: %s", task_name, data_format)
 
     if task_type == "robot_only":
@@ -277,8 +274,6 @@ def load_motion_data(
             human_joints = human_data["global_joint_positions"]
             object_poses = human_data["object_poses"]
             smpl_scale = constants.ROBOT_HEIGHT / float(human_data["height"])
-            if "root_quat" in human_data.files:
-                _root_quat_track = np.asarray(human_data["root_quat"], dtype=float)
         elif pt_path.exists():
             human_joints, object_poses = load_intermimic_data(str(pt_path))
             smpl_scale = calculate_scale_factor(task_name, constants.ROBOT_HEIGHT)
@@ -719,7 +714,7 @@ def main(cfg: RetargetingConfig) -> None:
     )
 
     # Create retargeter
-    terms = resolve_terms(cfg.terms, cfg.preset)
+    terms = cfg.terms
     logger.info("Solver terms%s: %s", f" (preset {cfg.preset})" if cfg.preset else "", terms)
     retargeter_kwargs = build_retargeter_kwargs_from_config(cfg.retargeter, constants, object_urdf_path, task_type, terms)
     # hcrl: per-window foot z-lock from precomputed stance windows (see hcrl/stance_windows.py) --
@@ -850,12 +845,6 @@ def main(cfg: RetargetingConfig) -> None:
         _shoulders = ("Left_Shoulder_Pitch", "Left_Shoulder_Roll", "Right_Shoulder_Pitch", "Right_Shoulder_Roll")
         _smooth_rows(retargeter)[retargeter._resolve_joint_rows(_shoulders)] = _shs
         logger.info("Shoulder smoothing weight: %.1f", _shs)
-
-    _rr = terms.root_rate_weight  # measured: no improvement, off by default
-    if _rr > 0 and _root_quat_track is not None:
-        retargeter.root_rate_weight = _rr
-        retargeter.root_quat_track = _root_quat_track
-        logger.info("Root angular-rate prior: w=%.1f over %d frames", _rr, len(_root_quat_track))
 
     _jaw = terms.joint_angle_weight
     if _jaw > 0 and robot == "t1":
@@ -997,12 +986,10 @@ def main(cfg: RetargetingConfig) -> None:
     _ankles = [n for n in ("L_Ankle", "R_Ankle", "LeftFoot", "RightFoot") if n in retargeter.demo_joints]
     if len(_ankles) == 2:
         retargeter.ankle_kp_cols = np.array([retargeter.demo_joints.index(n) for n in _ankles])
-    # hcrl: source foot heading from the ankle->toe direction, for the retargeter's foot-yaw term
+    # source foot heading from the ankle->toe direction, for the retargeter's foot-yaw term
     _fyw = terms.foot_yaw_weight
-    _ankle_names = [n for n in ("L_Ankle", "R_Ankle", "LeftFoot", "RightFoot") if n in retargeter.demo_joints]
-    if _fyw > 0 and len(_ankle_names) == 2:
-        _ai = [retargeter.demo_joints.index(n) for n in _ankle_names]
-        _fwd = human_joints[:, _toe_idx] - human_joints[:, _ai]
+    if _fyw > 0 and len(_ankles) == 2:
+        _fwd = human_joints[:, _toe_idx] - human_joints[:, retargeter.ankle_kp_cols]
         retargeter.foot_yaw_seq = np.arctan2(_fwd[..., 1], _fwd[..., 0])
         retargeter.foot_yaw_weight = _fyw
         logger.info("Foot heading term: w=%.1f", _fyw)
@@ -1162,6 +1149,21 @@ def main(cfg: RetargetingConfig) -> None:
         input("Press Enter to exit ...")
 
 
+def parse_config(argv: list[str] | None = None) -> RetargetingConfig:
+    """Parse the CLI with ``--preset``'s terms as the defaults, so every explicit ``--terms.*`` value wins.
+
+    Args:
+        argv: Command-line arguments, or None for ``sys.argv[1:]``.
+
+    Returns:
+        The parsed config.
+    """
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--preset", default=None)
+    preset = pre.parse_known_args(argv)[0].preset
+    default = RetargetingConfig(preset=preset, terms=preset_terms(preset))
+    return tyro.cli(RetargetingConfig, default=default, args=argv)
+
+
 if __name__ == "__main__":
-    cfg = tyro.cli(RetargetingConfig)
-    main(cfg)
+    main(parse_config())

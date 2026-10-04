@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import logging
 import sys
 import time
+from importlib.metadata import version
 from pathlib import Path
 from types import ModuleType
 
@@ -19,12 +21,17 @@ from viser.extras import ViserUrdf  # type: ignore[import-not-found]
 from holosoma_retargeting.config_types.data_type import root_keypoint
 from holosoma_retargeting.config_types.retargeter import FootLockConfig, SelfCollisionConfig
 
+logger = logging.getLogger(__name__)
+
 # Substrings identifying arm keypoints in a joint mapping, across source formats.
 _ARM_KEYPOINT_PARTS = ("shoulder", "elbow", "wrist", "hand")
 
 # Foot points pushed out of the ball per side per frame. The deepest one drives the correction; the
 # rest pin the rotation the rigid foot would otherwise use to dodge it.
 BALL_CONTACT_POINTS = 6
+
+# packages whose versions decide the solve's output, recorded in every result file
+SOLVER_PACKAGES = ("mujoco", "cvxpy", "clarabel")
 
 # Add src to path for direct execution
 src_path = Path(__file__).parent.parent / "src"
@@ -127,6 +134,7 @@ class InteractionMeshRetargeter:
         self.sole_height_weight = 0.0
         self.sole_planted_height = 0.03
         self._sole_body_id_cache: dict[str, list[int]] = {}
+        self._foot_geoms: frozenset[int] | None = None
         # Solver-frame centres (T, 3) of an object that does NOT scale with the human, with the foot
         # surface points to keep out of it; NaN rows mean "no object this frame".
         self.ball_seq = None
@@ -142,14 +150,12 @@ class InteractionMeshRetargeter:
         self.joint_limit_barrier_joints = None  # optional (name, ...): barrier ONLY these joints
         self.pelvis_track_weight = 0.0  # source-pelvis position prior (kills the pelvis<->waist null space)
         self.arm_reg_weight = 0.0  # source-arm position prior (stops the solver parking a redundant arm)
-        self.root_rate_weight = 0.0  # match the SOURCE root angular rate (kills inferred-torso jitter)
         self.joint_angle_weight = 0.0  # track SOURCE anatomical joint angles, not just keypoint positions
         self.keypoint_track_weight = 0.0  # absolute position prior on EVERY mapped keypoint
         self.ball_track = None  # (T, 3) ball positions in the SOLVE frame (scaled + shifted)
         self.ball_contacts = ()  # tuples (toe_link_name, start, end, r0) in solve scale
         self.ball_tolerance = 0.005  # m, slack either side of r0
         self.joint_angle_targets = None  # {joint name: (T,) target angle in rad}
-        self.root_quat_track = None  # (T, 4) wxyz source root orientation, or None
         self.swing_ankle_weight = 0.0  # neutral-ankle prior while a foot is in free swing
         # Source foot heading (T, 2) [left, right], rad about +z: an ankle and a toe point leave the
         # sole's yaw to a 0.13 m lever, so the robot foot's own forward axis is steered to it.
@@ -613,6 +619,7 @@ class InteractionMeshRetargeter:
             tuple: (retargeted_motions, obj_pts_demo_list, obj_pts_list, tetrahedra)
         """
         human_joint_motions = self._apply_limb_retarget(human_joint_motions)
+        self._warn_inert_terms()
 
         num_frames = human_joint_motions.shape[0]
         if isinstance(object_points_local_demo, list):
@@ -757,6 +764,7 @@ class InteractionMeshRetargeter:
             human_joints=human_joint_motions,
             fps=30,
             cost=cost,
+            solver_versions=np.array(" ".join(f"{p}=={version(p)}" for p in SOLVER_PACKAGES)),
             **extras,
         )
         print("Saving results to path:", dest_res_path)
@@ -969,19 +977,14 @@ class InteractionMeshRetargeter:
                         Ja = J_WF[axis, self.q_a_indices]
                         foot_anchor_terms.append(cp.square(Ja @ dqa - delta))
 
-            # Soft foot-orientation ENGAGEMENT DAMPING: position pins alone let the ankle snap to a
-            # constraint-consistent attitude the frame a window binds. Penalize the foot's per-frame
-            # rotation (relative to the previous FRAME, so SQP iterations cannot compound it) through
-            # the first ~0.2 s of each window -- the foot still reaches whatever attitude its own
-            # geometry settles into, just smoothly. See _foot_orient_damp; swing/mid-stance untouched.
+            # damp the foot's per-frame rotation (against the previous frame, so SQP iterations cannot
+            # compound it) as a stance window binds; see _foot_orient_damp
             if apply_foot_lock and self.foot_orient_weight > 0 and not init_t:
                 for side in ("left", "right"):
                     w_damp = self._foot_orient_damp(side, frame_idx)
-                    if w_damp <= 0:
+                    bid = self._body_id(self.task_constants.FOOT_LINKS[side])
+                    if w_damp <= 0 or bid < 0:
                         continue
-                    bid = mujoco.mj_name2id(
-                        self.robot_model, mujoco.mjtObj.mjOBJ_BODY, f"{side}_ankle_roll_link"
-                    )
                     R_last = self._body_rot(q_t_last, bid)
                     R_now = self._body_rot(q, bid)  # also restores FK(q) for the Jacobian below
                     Jr = self._calc_rot_jacobian(bid)[:, self.q_a_indices]
@@ -996,8 +999,11 @@ class InteractionMeshRetargeter:
         # bodies other than the feet touching the ground: a body lying on the floor is held by many
         # contacts against targets it cannot reach, and the root rocks as the active set switches
         n_body_ground = sum(
-            1 for key, phi in phis.items()
-            if phi < 0.01 and any("ground" in self._geom_names[g] for g in key) and not any("foot" in self._geom_names[g] for g in key)
+            1
+            for key, phi in phis.items()
+            if phi < 0.01
+            and any("ground" in self._geom_names[g] for g in key)
+            and not any(self._is_foot_geom(g) for g in key)
         )
         contact_gain = 1.0 + self.body_contact_gain * n_body_ground
         for key, phi in phis.items():
@@ -1009,7 +1015,7 @@ class InteractionMeshRetargeter:
             # pull it into the floor, and rocks as the active contact set switches
             if self.ground_margin > 0:
                 names = (self._geom_names[key[0]], self._geom_names[key[1]])
-                if any("ground" in n for n in names) and not any("foot" in n for n in names):
+                if any("ground" in n for n in names) and not any(self._is_foot_geom(g) for g in key):
                     ground_soft.append(cp.square(cp.pos(self.ground_margin - (phi + Ja_n @ dqa))))
 
         # Self-collision constraints: new_distance >= tolerance  =>  phi + J @ dqa >= tol. Exact-penalty
@@ -1120,7 +1126,7 @@ class InteractionMeshRetargeter:
         # additive root-orientation damping per body-ground contact: the lying-body rock is in the
         # root, and a route without absolute position terms cannot afford to slow every joint
         root_extra = self.body_contact_root * n_body_ground
-        if root_extra > 0 and not init_t:
+        if root_extra > 0 and not init_t and self.q_a_init_idx == -7:
             _add_term("root_contact_damp", root_extra * cp.sum_squares(dqa[3:7] - dqa_smooth[3:7]))
         if init_t:
             pass
@@ -1190,13 +1196,13 @@ class InteractionMeshRetargeter:
                             * cp.square(cp.pos(Jp[2] @ dqa + (sole_now - target_height)))
                         )
 
-        # hcrl: FOOT HEADING. Steer the foot body's forward axis (toward its toe sphere) to the source
-        # ankle->toe heading; yaw only, so it never fights the sole-normal term above.
+        # foot heading: steer the foot body's forward axis (toward its toe sphere) to the source ankle->toe
+        # heading; yaw only, so it never fights the sole-normal term above
         if self.foot_yaw_weight > 0 and self.foot_yaw_seq is not None and not init_t:
             t = min(max(frame_idx, 0), len(self.foot_yaw_seq) - 1)
             for k, side in enumerate(("left", "right")):
-                bid = mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, self.task_constants.FOOT_LINKS[side])
-                toe = mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, f"{side}_foot_sphere_5_link")
+                bid = self._body_id(self.task_constants.FOOT_LINKS[side])
+                toe = self._body_id(self.task_constants.SOLE_LINKS[side][-1])
                 if bid < 0 or toe < 0:
                     continue
                 self._body_rot(q, bid)  # restores FK(q) for the Jacobian
@@ -1270,8 +1276,9 @@ class InteractionMeshRetargeter:
                 rows = np.stack(
                     [offset[i] / dist[i] @ self._point_jacobian(Jp, Jr, points[i] - origin) for i in deepest]
                 )
-                obj_terms.append(
-                    self.ball_weight * cp.sum_squares(cp.pos(-(rows @ dqa + (dist[deepest] - keep_out))))
+                _add_term(
+                    "ball_clearance",
+                    self.ball_weight * cp.sum_squares(cp.pos(-(rows @ dqa + (dist[deepest] - keep_out)))),
                 )
 
         # hcrl: PELVIS-TRACKING PRIOR. The interaction mesh is a DIFFERENTIAL (Laplacian) objective, so the
@@ -1285,18 +1292,6 @@ class InteractionMeshRetargeter:
                 self.pelvis_track_weight
                 * cp.sum_squares(J_OC_dict[k] @ dqa - (human_src_pts[self._pelvis_kp] - p_OC_dict[k]))
             )
-
-        # hcrl: ROOT ANGULAR-RATE PRIOR. The source gives only joint POSITIONS, so torso orientation is
-        # inferred from a handful of points and comes out noisier than the motion it came from (measured
-        # 1.45x the source's per-frame rotation). Matching the source's rotation RATE -- not its absolute
-        # orientation, whose rest pose differs from the robot's -- removes that jitter.
-        if self.root_rate_weight > 0 and self.root_quat_track is not None and not init_t:
-            _t = min(max(frame_idx, 1), len(self.root_quat_track) - 1)
-            _q0, _q1 = self.root_quat_track[_t - 1], self.root_quat_track[_t]
-            if float(np.dot(_q0, _q1)) < 0.0:  # quaternion double cover
-                _q1 = -_q1
-            _dq_src = _q1 - _q0
-            _add_term("root_rate", self.root_rate_weight * cp.sum_squares(dqa[3:7] - _dq_src))
 
         # hcrl: JOINT-ANGLE TRACKING. Everything else in this objective matches keypoint POSITIONS. On a
         # robot whose proportions differ from the human's, position matching necessarily distorts the joint
@@ -1368,7 +1363,7 @@ class InteractionMeshRetargeter:
         # (see _foot_orient_damp), and this prior deliberately does not reintroduce one.
         if self.swing_ankle_weight > 0 and apply_foot_lock and not init_t:
             for side in ("left", "right"):
-                key = f"{side}_ankle_roll_link"
+                key = self.task_constants.FOOT_LINKS[side]
                 free_swing = (
                     self._is_foot_locked_in_window(key, frame_idx) is None
                     and self._foot_orient_damp(side, frame_idx) <= 0.0
@@ -1472,6 +1467,38 @@ class InteractionMeshRetargeter:
                 for name in self.task_constants.SOLE_LINKS[side]
             ]
         return self._sole_body_id_cache[side]
+
+    def _body_id(self, name: str) -> int:
+        """Body id by name, or -1 when the robot has no such body."""
+        return mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, name)
+
+    def _warn_inert_terms(self) -> None:
+        """Log each positive-weight term whose bodies, keypoints or joints this robot and source lack."""
+        links = self.task_constants.SOLE_LINKS
+        feet_missing = any(self._body_id(n) < 0 for n in self.task_constants.FOOT_LINKS.values())
+        soles_missing = any(self._body_id(n) < 0 for side in links.values() for n in side)
+        unresolved_hinges = [n for n in (self.joint_angle_targets or {}) if not len(self._resolve_joint_rows((n,)))]
+        inert = {
+            "foot_yaw": self.foot_yaw_weight > 0 and (feet_missing or soles_missing),
+            "foot_orient": self.foot_orient_weight > 0 and feet_missing,
+            "sole_normal": self.sole_normal_weight > 0 and (feet_missing or soles_missing),
+            "sole_height": self.sole_height_weight > 0 and (feet_missing or soles_missing),
+            "arm_reg": self.arm_reg_weight > 0 and not self._arm_kps,
+            "swing_ankle": self.swing_ankle_weight > 0 and any(not len(r) for r in self._ankle_rows.values()),
+            "joint_angle": self.joint_angle_weight > 0 and bool(unresolved_hinges),
+        }
+        for term, is_inert in inert.items():
+            if is_inert:
+                logger.warning("%s has a positive weight but resolves to nothing on this robot and source", term)
+
+    def _is_foot_geom(self, geom_id: int) -> bool:
+        """Whether a geom belongs to a foot body or one of its sole spheres."""
+        if self._foot_geoms is None:
+            links = self.task_constants.SOLE_LINKS
+            names = {*self.task_constants.FOOT_LINKS.values(), *(n for side in links.values() for n in side)}
+            bodies = [b for b in (self._body_id(n) for n in names) if b >= 0]
+            self._foot_geoms = frozenset(np.flatnonzero(np.isin(self.robot_model.geom_bodyid, bodies)).tolist())
+        return geom_id in self._foot_geoms
 
     @staticmethod
     def _point_jacobian(jac_pos: np.ndarray, jac_rot: np.ndarray, arm: np.ndarray) -> np.ndarray:
