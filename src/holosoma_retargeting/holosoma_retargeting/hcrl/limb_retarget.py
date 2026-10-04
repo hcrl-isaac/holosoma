@@ -30,7 +30,6 @@ def robot_segment_lengths(model, data, mapping: dict[str, str], mj, samples: int
     Returns:
         ``(parent, length, rigid)`` keyed by source-joint name.
     """
-    import numpy as _np
 
     def fk_positions(q):
         data.qpos[:] = 0.0
@@ -40,7 +39,7 @@ def robot_segment_lengths(model, data, mapping: dict[str, str], mj, samples: int
         if model.nq >= 7:  # a zero quaternion is invalid; keep the free joint upright
             data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
         mj.mj_forward(model, data)
-        return {src: _np.array(data.xpos[bid]) for src, bid in body_of.items()}
+        return {src: np.array(data.xpos[bid]) for src, bid in body_of.items()}
 
     body_of = {}
     for src, body in mapping.items():
@@ -77,18 +76,18 @@ def robot_segment_lengths(model, data, mapping: dict[str, str], mj, samples: int
     length = {}
     lo = model.jnt_range[:, 0].copy()
     hi = model.jnt_range[:, 1].copy()
-    rng = _np.random.default_rng(0)
+    rng = np.random.default_rng(0)
     for src, p_src in parent.items():
         if p_src is None:
             length[src] = 0.0
             continue
         if rigid[src]:
-            length[src] = float(_np.linalg.norm(pos0[src] - pos0[p_src]))
+            length[src] = float(np.linalg.norm(pos0[src] - pos0[p_src]))
             continue
-        zero = float(_np.linalg.norm(pos0[src] - pos0[p_src]))
+        zero = float(np.linalg.norm(pos0[src] - pos0[p_src]))
         best, worst = zero, zero
         for _ in range(samples):
-            q = _np.zeros(model.nq)
+            q = np.zeros(model.nq)
             m = min(model.njnt, len(lo))
             for j in range(m):
                 a, b = lo[j], hi[j]
@@ -96,7 +95,7 @@ def robot_segment_lengths(model, data, mapping: dict[str, str], mj, samples: int
                 if adr < model.nq and b > a:
                     q[adr] = rng.uniform(a, b)
             pos = fk_positions(q)
-            dist = float(_np.linalg.norm(pos[src] - pos[p_src]))
+            dist = float(np.linalg.norm(pos[src] - pos[p_src]))
             best, worst = max(best, dist), min(worst, dist)
         # A span whose joints barely change its length (a waist yaw between pelvis and hip) is rigid
         # in effect; prescribing it keeps the hips where the robot's hips are.

@@ -11,7 +11,6 @@ import argparse
 import json
 from pathlib import Path
 
-import numpy as np
 import trimesh
 
 PKG_ROOT = Path(__file__).resolve().parents[1]

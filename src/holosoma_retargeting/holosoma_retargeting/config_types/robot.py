@@ -170,9 +170,7 @@ class RobotConfig:
             return self.ankle_joints
 
         if self.robot_type == "g1":
-            return {
-                side: [f"{side}_ankle_pitch_joint", f"{side}_ankle_roll_joint"] for side in ("left", "right")
-            }
+            return {side: [f"{side}_ankle_pitch_joint", f"{side}_ankle_roll_joint"] for side in ("left", "right")}
         if self.robot_type == "t1":
             return {
                 side: [f"{side.capitalize()}_Ankle_Pitch", f"{side.capitalize()}_Ankle_Roll"]

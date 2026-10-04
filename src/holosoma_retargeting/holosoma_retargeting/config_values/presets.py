@@ -2,25 +2,25 @@
 
 from __future__ import annotations
 
-_T1_COMMON = dict(
-    limb_retarget=True,
-    foot_calib=True,
-    sole_height_weight=0.0,
-    self_collision="left_foot_link:right_foot_link",
-    self_collision_margin=0.04,
-    self_collision_margin_weight=1000.0,
-    self_collision_escape=0.005,
-    foot_stack_clearance=0.03,
-    foot_stack_weight=2000.0,
-    t1_manual=True,
-    hip_yaw_cost=0.5,
-    shoulder_cost=0.5,
-    twist_cost=0.0,
-    straight_twist_weight=2.0,
-    twist_smooth=5.0,
-    shoulder_smooth=5.0,
-    joint_smooth=2.0,
-)
+_T1_COMMON = {
+    "limb_retarget": True,
+    "foot_calib": True,
+    "sole_height_weight": 0.0,
+    "self_collision": "left_foot_link:right_foot_link",
+    "self_collision_margin": 0.04,
+    "self_collision_margin_weight": 1000.0,
+    "self_collision_escape": 0.005,
+    "foot_stack_clearance": 0.03,
+    "foot_stack_weight": 2000.0,
+    "t1_manual": True,
+    "hip_yaw_cost": 0.5,
+    "shoulder_cost": 0.5,
+    "twist_cost": 0.0,
+    "straight_twist_weight": 2.0,
+    "twist_smooth": 5.0,
+    "shoulder_smooth": 5.0,
+    "joint_smooth": 2.0,
+}
 
 PRESETS: dict[str, dict] = {
     # keypoint + joint-angle tracking on top of the mesh; for non-manipulation corpora (AMASS)

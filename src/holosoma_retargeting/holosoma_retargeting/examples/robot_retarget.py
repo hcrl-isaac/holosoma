@@ -23,7 +23,11 @@ src_root = Path(__file__).resolve().parents[2]
 if str(src_root) not in sys.path:
     sys.path.insert(0, str(src_root))
 
-from holosoma_retargeting.config_types.data_type import DEMO_JOINTS_REGISTRY, MotionDataConfig, root_keypoint  # noqa: E402
+from holosoma_retargeting.config_types.data_type import (  # noqa: E402
+    DEMO_JOINTS_REGISTRY,
+    MotionDataConfig,
+    root_keypoint,
+)
 from holosoma_retargeting.config_types.retargeter import RetargeterConfig  # noqa: E402
 from holosoma_retargeting.config_types.retargeting import RetargetingConfig  # noqa: E402
 from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
@@ -716,7 +720,9 @@ def main(cfg: RetargetingConfig) -> None:
     # Create retargeter
     terms = cfg.terms
     logger.info("Solver terms%s: %s", f" (preset {cfg.preset})" if cfg.preset else "", terms)
-    retargeter_kwargs = build_retargeter_kwargs_from_config(cfg.retargeter, constants, object_urdf_path, task_type, terms)
+    retargeter_kwargs = build_retargeter_kwargs_from_config(
+        cfg.retargeter, constants, object_urdf_path, task_type, terms
+    )
     # hcrl: per-window foot z-lock from precomputed stance windows (see hcrl/stance_windows.py) --
     # xy sticking alone stops skate but nothing pulls a hovering source foot DOWN to the surface.
     _stick_path = data_path / task_name / f"{task_name}_foot_sticking.npz" if task_type == "climbing" else None
@@ -770,7 +776,9 @@ def main(cfg: RetargetingConfig) -> None:
         _cap = terms.elbow_cap
         retargeter.q_a_lb[retargeter._resolve_joint_rows(("Left_Elbow_Yaw",))] = -_cap
         retargeter.q_a_ub[retargeter._resolve_joint_rows(("Right_Elbow_Yaw",))] = _cap
-        logger.info("T1 manual regularizers: waist cost %.2f, elbow flexion cap %.2f", retargeter.Q_diag[_rows][0], _cap)
+        logger.info(
+            "T1 manual regularizers: waist cost %.2f, elbow flexion cap %.2f", retargeter.Q_diag[_rows][0], _cap
+        )
 
     # hcrl: anti-oscillation damping when stance windows are active -- with the toe anchored and
     # sole-sphere XY stuck, the lateral-lean null space is near-tied and flips at 15 Hz (ankle-roll
@@ -833,8 +841,16 @@ def main(cfg: RetargetingConfig) -> None:
     _apw = terms.arm_plane_weight
     if _apw > 0:
         _names = list(retargeter.laplacian_match_links.keys())
-        _tri = [t for t in (("L_Shoulder", "L_Elbow", "L_Wrist"), ("R_Shoulder", "R_Elbow", "R_Wrist"),
-                            ("LeftArm", "LeftForeArm", "LeftHand"), ("RightArm", "RightForeArm", "RightHand")) if all(n in _names for n in t)]
+        _tri = [
+            t
+            for t in (
+                ("L_Shoulder", "L_Elbow", "L_Wrist"),
+                ("R_Shoulder", "R_Elbow", "R_Wrist"),
+                ("LeftArm", "LeftForeArm", "LeftHand"),
+                ("RightArm", "RightForeArm", "RightHand"),
+            )
+            if all(n in _names for n in t)
+        ]
         retargeter.arm_plane_triples = tuple(_tri)
         retargeter.arm_plane_weight = _apw
         logger.info("Arm-plane term: w=%.1f on %d arms", _apw, len(_tri))
@@ -960,8 +976,12 @@ def main(cfg: RetargetingConfig) -> None:
             {_toes[0]: bool(_mask[min(t, len(_mask) - 1), 0]), _toes[1]: bool(_mask[min(t, len(_mask) - 1), 1])}
             for t in range(len(human_joints))
         ]
-        logger.info("Loaded foot sticking override: %s (L %.0f%% / R %.0f%%)",
-                    sticking_file.name, 100 * _mask[:, 0].mean(), 100 * _mask[:, 1].mean())
+        logger.info(
+            "Loaded foot sticking override: %s (L %.0f%% / R %.0f%%)",
+            sticking_file.name,
+            100 * _mask[:, 0].mean(),
+            100 * _mask[:, 1].mean(),
+        )
 
         # Stance frames get the tight default cap: a planted foot has no licence to move fast.
         for _side, _k in (("windows_left", 0), ("windows_right", 1)):
@@ -993,8 +1013,12 @@ def main(cfg: RetargetingConfig) -> None:
         retargeter.foot_yaw_seq = np.arctan2(_fwd[..., 1], _fwd[..., 0])
         retargeter.foot_yaw_weight = _fyw
         logger.info("Foot heading term: w=%.1f", _fyw)
-    logger.info("Toe-step cap: default %.3f, per-clip max L %.3f / R %.3f m/frame",
-                DEFAULT_TOE_STEP_CAP, toe_step_cap[:, 0].max(), toe_step_cap[:, 1].max())
+    logger.info(
+        "Toe-step cap: default %.3f, per-clip max L %.3f / R %.3f m/frame",
+        DEFAULT_TOE_STEP_CAP,
+        toe_step_cap[:, 0].max(),
+        toe_step_cap[:, 1].max(),
+    )
 
     # Source sole planes, when the format supplies them: the joint mapping pins only an ankle and a
     # toe per foot, which leaves pitch/roll free and lets the sole settle toe-down. Scaling and
@@ -1029,7 +1053,11 @@ def main(cfg: RetargetingConfig) -> None:
                         _c, _s = np.cos(_bias), np.sin(_bias)
                         # Rodrigues rotation of each normal about its own lateral axis by -bias
                         _n[:] = _n * _c + np.cross(_lat, _n) * _s + _lat * (_lat * _n).sum(1, keepdims=True) * (1 - _c)
-                        logger.info("Sole-normal calibration: foot %d planted median pitch %.1f deg removed", _kk, np.degrees(_bias))
+                        logger.info(
+                            "Sole-normal calibration: foot %d planted median pitch %.1f deg removed",
+                            _kk,
+                            np.degrees(_bias),
+                        )
                 sole_normal /= np.linalg.norm(sole_normal, axis=-1, keepdims=True) + 1e-9
             retargeter.sole_normal_seq = sole_normal
             retargeter.sole_normal_weight = terms.sole_weight
@@ -1038,8 +1066,11 @@ def main(cfg: RetargetingConfig) -> None:
             retargeter.sole_height_seq = np.maximum(source_npz_height * smpl_scale, 0.0)
             retargeter.sole_height_weight = terms.sole_height_weight
             tilt = np.degrees(np.arccos(np.clip(sole_normal[..., 2], -1.0, 1.0)))
-            logger.info("Sole-orientation matching: weight %.1f, source tilt median %.1f deg",
-                        retargeter.sole_normal_weight, float(np.median(tilt)))
+            logger.info(
+                "Sole-orientation matching: weight %.1f, source tilt median %.1f deg",
+                retargeter.sole_normal_weight,
+                float(np.median(tilt)),
+            )
 
         # hcrl: the SMPL toe joint sits 3-6 cm above the sole where the robot's toe sphere is the sole,
         # so a planted source foot asks the robot foot to hover. Measure the planted-frame median toe
@@ -1060,7 +1091,10 @@ def main(cfg: RetargetingConfig) -> None:
                     toe_z.append(float(np.median(human_joints[planted[:, k], j, 2])) - (_bz(robot_toe) - sole_z))
             if toe_z:
                 retargeter.ground_kp_offset = float(np.mean(toe_z))
-                logger.info("Foot keypoint calibration: planted toe target %.1f mm above the robot toe", 1000 * retargeter.ground_kp_offset)
+                logger.info(
+                    "Foot keypoint calibration: planted toe target %.1f mm above the robot toe",
+                    1000 * retargeter.ground_kp_offset,
+                )
 
     # A ball keeps its real radius while the human shrinks to robot size, so scaled contact geometry
     # ends up inside it. Ball centres come from the source's own sidecar and ride along to the output.
@@ -1079,19 +1113,21 @@ def main(cfg: RetargetingConfig) -> None:
         if len(ball_pos) == len(human_joints):
             retargeter.ball_radius = ball_contact.BALL_RADIUS_M
             retargeter.ball_seq = ball_contact.to_solver_frame(ball_pos, smpl_scale, retargeter.ball_radius)
-            retargeter.ball_foot_points = ball_contact.foot_surface_points(
-                retargeter.robot_model, constants.FOOT_LINKS
-            )
+            retargeter.ball_foot_points = ball_contact.foot_surface_points(retargeter.robot_model, constants.FOOT_LINKS)
             retargeter.ball_weight = terms.ball_weight
             if ball_gap is not None:
                 retargeter.ball_clearance_seq = ball_contact.target_clearance(
-                    ball_gap.astype(np.float64), terms.ball_band if terms.ball_band is not None else ball_contact.BALL_CLEARANCE_BAND_M
+                    ball_gap.astype(np.float64),
+                    terms.ball_band if terms.ball_band is not None else ball_contact.BALL_CLEARANCE_BAND_M,
                 )
             tracked = np.isfinite(retargeter.ball_seq).all(axis=1)
-            logger.info("Ball clearance: weight %.0f, radius %.3f m, source clearance %s, %.0f%% of frames tracked",
-                        retargeter.ball_weight, retargeter.ball_radius,
-                        "yes" if ball_gap is not None else "MISSING (non-penetration only)",
-                        100 * float(tracked.mean()))
+            logger.info(
+                "Ball clearance: weight %.0f, radius %.3f m, source clearance %s, %.0f%% of frames tracked",
+                retargeter.ball_weight,
+                retargeter.ball_radius,
+                "yes" if ball_gap is not None else "MISSING (non-penetration only)",
+                100 * float(tracked.mean()),
+            )
             # hcrl: optionally HOLD the entry distance r0 through each detected dribble contact -- the
             # clearance cost alone cannot beat ~50 mm of solver noise, the hard radial band can.
             if terms.ball_constraint:
@@ -1111,11 +1147,17 @@ def main(cfg: RetargetingConfig) -> None:
                             _in = False
                 retargeter.ball_track = retargeter.ball_seq
                 retargeter.ball_contacts = tuple(_segs)
-                logger.info("Ball contact hold: %d segment(s): %s", len(_segs),
-                            [(l.split("_")[0], a, b, round(r, 3)) for l, a, b, r in _segs])
+                logger.info(
+                    "Ball contact hold: %d segment(s): %s",
+                    len(_segs),
+                    [(link.split("_")[0], a, b, round(r, 3)) for link, a, b, r in _segs],
+                )
         else:
-            logger.warning("Ball sidecar has %d frames for %d source frames; skipping the ball term",
-                           len(ball_pos), len(human_joints))
+            logger.warning(
+                "Ball sidecar has %d frames for %d source frames; skipping the ball term",
+                len(ball_pos),
+                len(human_joints),
+            )
 
     # Task-specific foot sticking adjustments
     if task_type == "object_interaction":

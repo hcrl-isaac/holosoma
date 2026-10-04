@@ -247,8 +247,7 @@ class InteractionMeshRetargeter:
         # quaternion whose MANUAL_LB/UB box is +-1), which must never see the joint-limit barrier.
         self._actuated_rows = np.flatnonzero(self.q_a_indices >= 7)
         self._ankle_rows = {
-            side: self._resolve_joint_rows(tuple(joints))
-            for side, joints in self.task_constants.ANKLE_JOINTS.items()
+            side: self._resolve_joint_rows(tuple(joints)) for side, joints in self.task_constants.ANKLE_JOINTS.items()
         }
         # Keypoint priors index the joint mapping, whose order and names vary by source format.
         match_names = list(self.laplacian_match_links.keys())
@@ -506,7 +505,6 @@ class InteractionMeshRetargeter:
             self.draw_keypoints(q, name=f"{group_name}_q", rgba=(0.0, 1.0, 0.0, 1.0))
             self.draw_keypoints(c, name=f"{group_name}_c", rgba=(1.0, 0.0, 0.0, 1.0))
 
-
     def _apply_limb_retarget(self, human_joint_motions):
         """Rescale the mapped source keypoints to the robot's own segment lengths.
 
@@ -560,7 +558,12 @@ class InteractionMeshRetargeter:
         # that at contact, widen each foot's targets laterally (about the pelvis heading) by half the
         # shortfall, so the solve anticipates the robot's foot width.
         min_sep = float(getattr(self, "foot_min_sep", 0.0))
-        if min_sep > 0 and self.toe_kp_indices and len(self.toe_kp_indices) == 2 and getattr(self, "hip_kp_indices", None):
+        if (
+            min_sep > 0
+            and self.toe_kp_indices
+            and len(self.toe_kp_indices) == 2
+            and getattr(self, "hip_kp_indices", None)
+        ):
             mapped = np.asarray(self.smplh_mapped_joint_indices)
             hl, hr = (mapped[i] for i in self.hip_kp_indices)
             lat = out[:, hl, :2] - out[:, hr, :2]  # left-pointing lateral axis
@@ -577,7 +580,12 @@ class InteractionMeshRetargeter:
                 out[:, c, :2] -= shift
         # On flat ground a toe target below the sole is source noise the non-penetration constraint
         # will refuse anyway; asking for it only drags the body down at foot strike.
-        if self.toe_kp_indices and self.object_name == "ground" and offset != 0.0 and getattr(self, "toe_floor_clamp", True):
+        if (
+            self.toe_kp_indices
+            and self.object_name == "ground"
+            and offset != 0.0
+            and getattr(self, "toe_floor_clamp", True)
+        ):
             toe_cols = np.asarray(self.smplh_mapped_joint_indices)[np.asarray(self.toe_kp_indices)]
             lift = np.maximum(0.005 - out[:, toe_cols, 2], 0.0)  # (T, 2)
             out[:, toe_cols, 2] += lift
@@ -936,7 +944,9 @@ class InteractionMeshRetargeter:
                         # let the stance foot move as far as the SOURCE foot moved this frame.
                         tol = self.foot_sticking_tolerance
                         if self.stick_tol_seq is not None:
-                            tol = float(self.stick_tol_seq[min(frame_idx, len(self.stick_tol_seq) - 1), 0 if apply_left else 1])
+                            tol = float(
+                                self.stick_tol_seq[min(frame_idx, len(self.stick_tol_seq) - 1), 0 if apply_left else 1]
+                            )
                         p_lb = p_WF_t_last_dict[key] - p_WF_dict[key] - tol
                         p_ub = p_lb + 2 * tol  # symmetric window
 
@@ -1049,10 +1059,9 @@ class InteractionMeshRetargeter:
         obj_terms = []
         term_labels = []
 
-        def _add_term(label, expr):  # noqa: ANN001, ANN202
+        def _add_term(label, expr):
             obj_terms.append(expr)
             term_labels.append(label)
-
 
         if use_lap:
             _add_term("laplacian", cp.sum_squares(cp.multiply(sqrt_w3, lap_var - target_lap_vec)))
@@ -1068,7 +1077,10 @@ class InteractionMeshRetargeter:
         # stance foot vertically; the required gap ramps with the overlap, so the foot descends as it
         # slides off instead of dropping when the contact constraint releases.
         if self.foot_stack_clearance > 0 and not init_t:
-            ids = [mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, self.task_constants.FOOT_LINKS[s]) for s in ("left", "right")]
+            ids = [
+                mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, self.task_constants.FOOT_LINKS[s])
+                for s in ("left", "right")
+            ]
             if min(ids) >= 0:
                 self.robot_data.qpos[:] = q
                 mujoco.mj_forward(self.robot_model, self.robot_data)
@@ -1086,7 +1098,10 @@ class InteractionMeshRetargeter:
                     J_lo = self._calc_pos_jacobian(ids[lo_])[:, self.q_a_indices]
                     dz_now = float((pl if hi == 0 else pr)[2] - (pr if hi == 0 else pl)[2])
                     need = self.foot_stack_thickness + overlap * self.foot_stack_clearance
-                    _add_term("foot_stack", self.foot_stack_weight * cp.square(cp.pos(need - (dz_now + (J_hi[2] - J_lo[2]) @ dqa))))
+                    _add_term(
+                        "foot_stack",
+                        self.foot_stack_weight * cp.square(cp.pos(need - (dz_now + (J_hi[2] - J_lo[2]) @ dqa))),
+                    )
 
         # foot anchor pull (see foot-lock block): heavily weighted so stance feet land and stay planted
         if apply_foot_lock and foot_anchor_terms:
@@ -1150,8 +1165,9 @@ class InteractionMeshRetargeter:
                 q_new = dqa[rows] + q_a_n_last[rows]
                 over = cp.pos(q_new - (self.q_a_ub[rows] - m))
                 under = cp.pos((self.q_a_lb[rows] + m) - q_new)
-                _add_term("joint_limit_barrier", 
-                    self.joint_limit_barrier_weight * (cp.sum_squares(over) + cp.sum_squares(under))
+                _add_term(
+                    "joint_limit_barrier",
+                    self.joint_limit_barrier_weight * (cp.sum_squares(over) + cp.sum_squares(under)),
                 )
 
         # hcrl: SOLE-ORIENTATION MATCHING. Two mapped points per foot (an ankle and a toe) define a
@@ -1191,9 +1207,9 @@ class InteractionMeshRetargeter:
                         # and driving through the target relies on the non-penetration constraint
                         # catching it -- which is what put feet through the ground. Here that
                         # constraint is the floor and this term only ever pushes down onto it.
-                        _add_term("foot_approach", 
-                            self.sole_height_weight
-                            * cp.square(cp.pos(Jp[2] @ dqa + (sole_now - target_height)))
+                        _add_term(
+                            "foot_approach",
+                            self.sole_height_weight * cp.square(cp.pos(Jp[2] @ dqa + (sole_now - target_height))),
                         )
 
         # foot heading: steer the foot body's forward axis (toward its toe sphere) to the source ankle->toe
@@ -1231,18 +1247,28 @@ class InteractionMeshRetargeter:
                 n_src = np.cross(u_s, v_s)
                 sin_bend = float(np.linalg.norm(n_src) / (np.linalg.norm(u_s) * np.linalg.norm(v_s) + 1e-9))
                 # the plane is undefined for a straight arm; fade the term in between 15 and 35 deg of bend
-                gate = float(np.clip((sin_bend - np.sin(np.radians(15))) / (np.sin(np.radians(35)) - np.sin(np.radians(15))), 0.0, 1.0))
+                gate = float(
+                    np.clip(
+                        (sin_bend - np.sin(np.radians(15))) / (np.sin(np.radians(35)) - np.sin(np.radians(15))),
+                        0.0,
+                        1.0,
+                    )
+                )
                 if gate <= 0.0:
                     continue
                 n_tgt = n_src / np.linalg.norm(n_src) * mag  # same bend magnitude, source direction
+
                 # d(u x v) = [u]x dv - [v]x du, with du = Je - Js, dv = Jw - Je (dqa)
                 def skew(a):
                     return np.array([[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]])
+
                 dn = skew(u) @ (Jw_ - Je_) - skew(vv) @ (Je_ - Js_)
                 # normalize by the segment lengths, not |n|: dividing by a near-zero normal made the
                 # term's curvature explode at small bends and the elbow flickered straight/bent
                 scale = float(np.linalg.norm(u) * np.linalg.norm(vv) + 1e-9)
-                _add_term("arm_plane", gate * self.arm_plane_weight * cp.sum_squares((dn @ dqa + (n_now - n_tgt)) / scale))
+                _add_term(
+                    "arm_plane", gate * self.arm_plane_weight * cp.sum_squares((dn @ dqa + (n_now - n_tgt)) / scale)
+                )
 
         # hcrl: BALL CLEARANCE. The human is scaled to robot size but the ball is not, so a contact
         # that was tangent for the human lands (1 - scale) * radius inside it -- 33 mm for the T1.
@@ -1288,9 +1314,10 @@ class InteractionMeshRetargeter:
         # barrier above is the guard.
         if self.pelvis_track_weight > 0 and human_src_pts is not None:
             k = robot_link_keys[self._pelvis_kp]
-            _add_term("pelvis_track", 
+            _add_term(
+                "pelvis_track",
                 self.pelvis_track_weight
-                * cp.sum_squares(J_OC_dict[k] @ dqa - (human_src_pts[self._pelvis_kp] - p_OC_dict[k]))
+                * cp.sum_squares(J_OC_dict[k] @ dqa - (human_src_pts[self._pelvis_kp] - p_OC_dict[k])),
             )
 
         # hcrl: JOINT-ANGLE TRACKING. Everything else in this objective matches keypoint POSITIONS. On a
@@ -1371,9 +1398,7 @@ class InteractionMeshRetargeter:
                 )
                 rows_a = self._ankle_rows[side]
                 if free_swing and rows_a.size:
-                    _add_term("swing_ankle", 
-                        self.swing_ankle_weight * cp.sum_squares(dqa[rows_a] + q_a_n_last[rows_a])
-                    )
+                    _add_term("swing_ankle", self.swing_ankle_weight * cp.sum_squares(dqa[rows_a] + q_a_n_last[rows_a]))
 
         problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints)
 
@@ -1412,8 +1437,11 @@ class InteractionMeshRetargeter:
             vals = [(lab, float(t.value)) for lab, t in zip(term_labels, obj_terms)]
             tot = sum(v for _, v in vals) or 1.0
             top = sorted(vals, key=lambda kv: -kv[1])
-            print(f"[terms] frame {frame_idx} total={tot:.3f}: "
-                  + "  ".join(f"{k}={v:.3f}({100 * v / tot:.0f}%)" for k, v in top if v > 1e-4), flush=True)
+            print(
+                f"[terms] frame {frame_idx} total={tot:.3f}: "
+                + "  ".join(f"{k}={v:.3f}({100 * v / tot:.0f}%)" for k, v in top if v > 1e-4),
+                flush=True,
+            )
 
         q_star = np.copy(q)
         q_star[self.q_a_indices] = dqa_star + q_a_n_last

@@ -5,6 +5,8 @@ qpos rows are mujoco freejoint (xyz + wxyz quat) + 29 hinge joints in MODEL orde
 are cubic-interpolated, the quaternion slerped, from 30 fps back up to 120 fps.
 """
 
+from __future__ import annotations
+
 import argparse
 from pathlib import Path
 
@@ -49,10 +51,10 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for f in args.qpos_npz:
         d = np.load(f, allow_pickle=True)
-        df = qpos_to_csv(np.asarray(d["qpos"]), model, columns, args.upsample)
+        table = qpos_to_csv(np.asarray(d["qpos"]), model, columns, args.upsample)
         stem = Path(f).stem.replace("_original", "")
-        df.to_csv(out_dir / f"{stem}.csv", index=False)
-        print(f"[qpos2csv] {stem}: {d['qpos'].shape} -> {len(df)} rows")
+        table.to_csv(out_dir / f"{stem}.csv", index=False)
+        print(f"[qpos2csv] {stem}: {d['qpos'].shape} -> {len(table)} rows")
 
 
 if __name__ == "__main__":

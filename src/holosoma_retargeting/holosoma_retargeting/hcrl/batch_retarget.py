@@ -13,6 +13,8 @@ Writes ``<report>`` csv with per-clip: court, solve rc, final cost, support cove
 stretch, output path -- the quality gate for the bundle build filters on these columns.
 """
 
+from __future__ import annotations
+
 import argparse
 import csv
 import json
@@ -25,7 +27,7 @@ import mujoco
 import numpy as np
 import pandas as pd
 
-from holosoma_retargeting.config_types.data_type import G1FK_DEMO_JOINTS, TOE_NAMES_BY_FORMAT
+from holosoma_retargeting.config_types.data_type import TOE_NAMES_BY_FORMAT
 from holosoma_retargeting.hcrl import courts_to_scene, stance_windows
 from holosoma_retargeting.hcrl.csv_to_g1fk import DEFAULT_MODEL, fk_positions, qpos_row
 from holosoma_retargeting.hcrl.qpos_to_csv import qpos_to_csv
@@ -33,8 +35,9 @@ from holosoma_retargeting.hcrl.qpos_to_csv import qpos_to_csv
 PKG = Path(__file__).resolve().parents[1]
 
 
-def prep_clip(csv_path: Path, court: dict, court_boxes: np.ndarray, seq_dir: Path, model: mujoco.MjModel,
-              robot_xml: Path) -> None:
+def prep_clip(
+    csv_path: Path, court: dict, court_boxes: np.ndarray, seq_dir: Path, model: mujoco.MjModel, robot_xml: Path
+) -> None:
     seq_dir.mkdir(parents=True, exist_ok=True)
     np.save(seq_dir / f"{seq_dir.name}.npy", fk_positions(model, csv_path))
     np.save(seq_dir / f"{seq_dir.name}_q0.npy", qpos_row(model, csv_path))
@@ -54,15 +57,25 @@ def solve_clip(args: tuple) -> tuple:
     """Subprocess one retarget; returns (stem, rc, cost)."""
     stem, data_root, save_dir = args
     cmd = [
-        sys.executable, str(PKG / "examples" / "robot_retarget.py"),
-        "--data_path", str(data_root), "--task-type", "climbing", "--task-name", stem,
-        "--data_format", "g1fk",
-        "--robot-config.robot-urdf-file", str(PKG / "models" / "g1" / "g1_29dof_spherehand.urdf"),
-        "--task-config.object-dir", str(Path(data_root) / stem),
-        "--save_dir", str(save_dir),
+        sys.executable,
+        str(PKG / "examples" / "robot_retarget.py"),
+        "--data_path",
+        str(data_root),
+        "--task-type",
+        "climbing",
+        "--task-name",
+        stem,
+        "--data_format",
+        "g1fk",
+        "--robot-config.robot-urdf-file",
+        str(PKG / "models" / "g1" / "g1_29dof_spherehand.urdf"),
+        "--task-config.object-dir",
+        str(Path(data_root) / stem),
+        "--save_dir",
+        str(save_dir),
     ]
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, cwd=str(PKG))
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, cwd=str(PKG), check=False)
         cost = None
         for tok in reversed(out.stdout.replace("\r", "\n").split()):
             if tok.startswith("cost="):
@@ -81,7 +94,10 @@ def support_coverage(qpos: np.ndarray, boxes: np.ndarray, model: mujoco.MjModel)
     for t, row in enumerate(qpos):
         data.qpos[:] = row
         mujoco.mj_forward(model, data)
-        cl = [min(data.xpos[i][2] - stance_windows.terrain_z(data.xpos[i][None, :2], boxes)[0] for i in side) for side in sph]
+        cl = [
+            min(data.xpos[i][2] - stance_windows.terrain_z(data.xpos[i][None, :2], boxes)[0] for i in side)
+            for side in sph
+        ]
         minc[t] = min(cl) - 0.005
     airborne = minc >= 0.02
     longest = 0
@@ -143,8 +159,7 @@ def main() -> None:
     report_rows = []
     for stem, court_name in todo:
         rc, cost = results[stem]
-        rec = {"stem": stem, "court": court_name, "rc": rc, "cost": cost,
-               "support": None, "max_air_s": None, "out": ""}
+        rec = {"stem": stem, "court": court_name, "rc": rc, "cost": cost, "support": None, "max_air_s": None, "out": ""}
         npz = save_dir / f"{stem}_original.npz"
         if rc == 0 and npz.exists():
             q = np.load(npz, allow_pickle=True)["qpos"]
@@ -152,9 +167,9 @@ def main() -> None:
             rec["support"], rec["max_air_s"] = support_coverage(q, boxes, model)
             if columns is None:
                 columns = list(pd.read_csv(csv_dir / f"{stem}.csv", nrows=0).columns)
-            df = qpos_to_csv(np.asarray(q), model, columns, 4)
+            table = qpos_to_csv(np.asarray(q), model, columns, 4)
             out_path = export_dir / f"{stem}.csv"
-            df.to_csv(out_path, index=False)
+            table.to_csv(out_path, index=False)
             rec["out"] = str(out_path)
         report_rows.append(rec)
 
@@ -164,8 +179,12 @@ def main() -> None:
         w.writerows(report_rows)
     ok = [r for r in report_rows if r["rc"] == 0]
     sup = [r["support"] for r in ok if r["support"] is not None]
-    print(f"[batch] done: {len(ok)}/{len(report_rows)} solved | support med "
-          f"{np.median(sup) * 100:.0f}% min {min(sup) * 100:.0f}%" if sup else "[batch] no successes")
+    print(
+        f"[batch] done: {len(ok)}/{len(report_rows)} solved | support med "
+        f"{np.median(sup) * 100:.0f}% min {min(sup) * 100:.0f}%"
+        if sup
+        else "[batch] no successes"
+    )
 
 
 if __name__ == "__main__":

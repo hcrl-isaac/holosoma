@@ -11,6 +11,8 @@ Saved as ``<seq_dir>/<stem>_foot_sticking.npz``: ``sticking`` (T, 2) bool for xy
 ``windows_left`` / ``windows_right`` (n, 5) float arrays.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 from pathlib import Path
@@ -90,7 +92,9 @@ def compute(src: np.ndarray, boxes: np.ndarray, flight_tol: float) -> tuple[np.n
 
     # calibrated toe-center offset above the surface when planted (per clip; sphere radius + skin)
     planted = clear[masks]
-    offset = float(np.clip(np.percentile(planted, 20), 0.008, 0.05)) if planted.size else 0.02  # floor: sphere r=5mm + margin
+    offset = (
+        float(np.clip(np.percentile(planted, 20), 0.008, 0.05)) if planted.size else 0.02
+    )  # floor: sphere r=5mm + margin
 
     windows: list[list] = [[], []]
     for k in range(2):
