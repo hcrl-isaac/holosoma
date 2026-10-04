@@ -3,6 +3,7 @@ from __future__ import annotations
 import builtins
 import copy
 import dataclasses
+import math
 import os
 import xml.etree.ElementTree as ET
 from typing import Any
@@ -16,14 +17,22 @@ import isaaclab.terrains as terrain_gen
 import isaacsim.core.utils.stage as stage_utils
 import omni.log
 import torch
-from pxr import Usd
+from pxr import Usd, UsdGeom
 from isaaclab.actuators import IdealPDActuatorCfg
 from isaaclab.assets import Articulation, ArticulationCfg
 from isaaclab.envs import ViewerCfg, mdp
 from isaaclab.managers import EventManager, SceneEntityCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
-from isaaclab.sensors import ContactSensor, ContactSensorCfg, RayCaster, RayCasterCfg, patterns
+from isaaclab.sensors import (
+    ContactSensor,
+    ContactSensorCfg,
+    RayCaster,
+    RayCasterCfg,
+    TiledCamera,
+    TiledCameraCfg,
+    patterns,
+)
 from isaaclab.sim import PhysxCfg, SimulationCfg, SimulationContext
 from isaaclab.sim.utils import bind_physics_material
 from isaaclab.terrains import TerrainGeneratorCfg, TerrainImporterCfg
@@ -70,6 +79,22 @@ from holosoma.simulator.shared.virtual_gantry import (
 from holosoma.simulator.types import ActorNames, ActorIndices, EnvIds, ActorStates, ActorPoses
 
 
+def _hide_prim_subtree(stage: "Usd.Stage", prim_path: str) -> None:
+    """Make the geometry under ``prim_path`` invisible (rendering only; physics untouched).
+
+    Authors ``visibility = invisible`` on every Imageable prim in the subtree. The terrain root
+    (e.g. ``/World/ground``) is typeless, so setting visibility only there is a no-op; the visible
+    meshes are on Imageable descendants. Colliders are unaffected, so the body stays collidable.
+    """
+    root = stage.GetPrimAtPath(prim_path)
+    if not root.IsValid():
+        return
+    for prim in Usd.PrimRange(root):
+        imageable = UsdGeom.Imageable(prim)
+        if imageable:
+            imageable.MakeInvisible()
+
+
 class IsaacSim(BaseSimulator):
     def __init__(self, tyro_config: FullSimConfig, terrain_manager: TerrainManager, device: str):
         super().__init__(tyro_config, terrain_manager, device)
@@ -85,7 +110,7 @@ class IsaacSim(BaseSimulator):
 
         sim_config: SimulationCfg = SimulationCfg(
             dt=1.0 / self.simulator_config.sim.fps,
-            render_interval=self.simulator_config.sim.render_interval,
+            render_interval=self.simulator_config.sim.render_interval_steps,
             device=self.sim_device,
             physx=PhysxCfg(
                 bounce_threshold_velocity=self.simulator_config.sim.physx.bounce_threshold_velocity,
@@ -121,10 +146,10 @@ class IsaacSim(BaseSimulator):
             f"\tRendering step-size   : {1.0 / self.simulator_config.sim.fps * self.simulator_config.sim.substeps}"
         )
 
-        if self.simulator_config.sim.render_interval < self.simulator_config.sim.control_decimation:
+        if self.simulator_config.sim.render_interval_steps < self.simulator_config.sim.control_decimation_steps:
             msg = (
-                f"The render interval ({self.simulator_config.sim.render_interval}) is smaller than the decimation "
-                f"({self.simulator_config.sim.control_decimation}). Multiple render calls will happen for each "
+                f"The render interval ({self.simulator_config.sim.render_interval_steps}) is smaller than the decimation "
+                f"({self.simulator_config.sim.control_decimation_steps}). Multiple render calls will happen for each "
                 "environment step. If this is not intended, set the render interval to be equal to the decimation."
             )
             logger.warning(msg)
@@ -137,18 +162,19 @@ class IsaacSim(BaseSimulator):
         # generate scene
         with Timer("[INFO]: Time taken for scene creation", "scene_creation"):
             # Narrow the type from the base class's SceneInterface (which declares only
-            # env_origins) to IsaacLab's InteractiveScene — what self.scene actually is on this
-            # backend — so the rich .rigid_objects/.articulations/.sensors/... accesses below
+            # env_origins) to IsaacLab's InteractiveScene, what self.scene actually is on this
+            # backend, so the rich .rigid_objects/.articulations/.sensors/... accesses below
             # type-check. The base protocol stays correct for MuJoCo/IsaacGym, whose scenes
-            # genuinely implement only env_origins.
+            # implement only env_origins.
             self.scene: InteractiveScene = InteractiveScene(scene_config)
             self._setup_scene()
         print("[INFO]: Scene manager: ", self.scene)
 
+        viewer_config: ViewerCfg
         if self.simulator_config.viewer.enable_tracking:
-            viewer_config: ViewerCfg = ViewerCfg(origin_type="asset_root", asset_name="robot", eye=(0.0, -1.5, 1.5))
+            viewer_config = ViewerCfg(origin_type="asset_root", asset_name="robot", eye=(0.0, -1.5, 1.5))
         else:
-            viewer_config: ViewerCfg = ViewerCfg()
+            viewer_config = ViewerCfg()
 
         if self.sim.render_mode >= self.sim.RenderMode.PARTIAL_RENDERING:
             self.viewport_camera_controller: ViewportCameraController | None = ViewportCameraController(
@@ -438,6 +464,10 @@ class IsaacSim(BaseSimulator):
             terrain_config.env_spacing = self.scene.cfg.env_spacing
             terrain_config.class_type(terrain_config)
             global_collision_prims.append(terrain_config.prim_path)
+            # Hide the ground plane's visual while keeping its collider; avoids z-fighting a scene
+            # USD's own floor. Applied to the whole /World/ground subtree.
+            if terrain_state.hide_visual:
+                _hide_prim_subtree(stage_utils.get_current_stage(), terrain_prim_path)
         elif terrain_state.mesh_type in ["trimesh", "load_obj"]:
             self.terrain = self.terrain_manager.get_state("locomotion_terrain").terrain
             visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 0.0))
@@ -478,6 +508,10 @@ class IsaacSim(BaseSimulator):
             self._height_scanner = RayCaster(height_scanner_config)
             self.scene.sensors["height_scanner"] = self._height_scanner
 
+        # Perception cameras: one TiledCamera per configured camera, as a child prim of its
+        # mount body so it follows that body, created before clone so it replicates per env.
+        self._create_sensors_pre_clone()
+
         # clone, filter, and replicate
         self.scene.clone_environments(copy_from_source=False)
 
@@ -492,6 +526,122 @@ class IsaacSim(BaseSimulator):
             color=(0.98, 0.95, 0.88),
         )
         light_config1.func("/World/DomeLight", light_config1, translation=(1, 0, 10))
+
+        # Register the TiledCameras (built pre-clone above) into the shared SensorManager. Done
+        # here at the end of scene build (IsaacSim builds its scene in __init__, not load_assets).
+        self._create_sensors()
+
+    # ----- Camera sensors (TiledCamera; child prim of the mount body, auto-follow) -----
+
+    def _camera_mount_prim_path(self, mount) -> str:
+        """Resolve a sensor mount to a per-env camera prim path (parent = the mount body prim).
+
+        ``robot_link`` -> a robot link prim (name the root link to mount on the base);
+        ``actor`` -> a spawned scene-object prim. The camera prim is created as a child of this
+        path so the USD transform hierarchy makes it follow the body natively.
+        """
+        ns = "/World/envs/env_.*"
+        if mount.target_kind == "robot_link":
+            valid = self.robot_config.body_names
+            if mount.target not in valid:
+                raise ValueError(f"Camera robot_link '{mount.target}' not a robot body. Known: {valid}.")
+            return f"{ns}/Robot/{mount.target}"
+        if mount.target_kind == "actor":
+            return f"{ns}/{mount.target}"
+        if mount.target_kind == "world":
+            # Free-floating: child of the env prim itself, so the mount offset is the pose in the
+            # per-env frame (each cloned env carries its own copy at the same relative pose).
+            return ns
+        raise ValueError(f"Unknown camera mount target_kind '{mount.target_kind}'.")
+
+    def _create_sensors_pre_clone(self) -> None:
+        """Build a TiledCamera per configured camera (before clone, so each replicates per env).
+
+        The camera optical convention is OpenGL (-Z forward, +Y up), the same frame holosoma uses,
+        so the mount offset passes through with ``convention="opengl"`` and no extra rotation.
+        Mount quat is the config-layer ``[w,x,y,z]`` (IsaacLab OffsetCfg.rot is also w-first).
+        """
+        self._tiled_cameras = {}
+        for cam_name, cam in self.sensor_config.items():
+            parent = self._camera_mount_prim_path(cam.mount)
+            # Map holosoma data_types -> IsaacLab annotators.
+            annotators = [{"rgb": "rgb", "depth": "distance_to_image_plane"}[d] for d in cam.data_types]
+            cam_cfg = TiledCameraCfg(
+                prim_path=f"{parent}/{cam_name}",
+                offset=TiledCameraCfg.OffsetCfg(
+                    pos=tuple(cam.mount.position),
+                    rot=tuple(cam.mount.orientation),  # (w, x, y, z)
+                    convention="opengl",  # -Z forward / +Y up, the frame holosoma uses
+                ),
+                data_types=annotators,
+                spawn=self._pinhole_cfg_for(cam),
+                width=cam.width,
+                height=cam.height,
+                # No-hit / beyond-far depth handling, done natively by the TiledCamera.
+                depth_clipping_behavior=(cam.isaacsim.depth_clipping_behavior if cam.isaacsim is not None else "none"),
+            )
+            self._tiled_cameras[cam_name] = TiledCamera(cam_cfg)
+            self.scene.sensors[cam_name] = self._tiled_cameras[cam_name]
+
+    def _pinhole_cfg_for(self, cam):
+        """Build a PinholeCameraCfg honoring the configured vertical FOV.
+
+        IsaacLab derives the rendered FOV from the aperture/focal-length pair; for a fixed
+        focal length, vertical_aperture = 2*f*tan(vfov/2) sets the vertical FOV, and
+        horizontal_aperture = vertical_aperture * (width/height) keeps square pixels (so a
+        square sensor has equal horizontal and vertical FOV).
+        """
+        isaacsim_cfg = cam.isaacsim
+        focal_length = isaacsim_cfg.focal_length if (isaacsim_cfg and isaacsim_cfg.focal_length) else 24.0
+        v_aperture = 2.0 * focal_length * math.tan(math.radians(cam.vertical_fov) / 2)
+        h_aperture = v_aperture * (cam.width / cam.height)
+        kwargs = dict(
+            focal_length=focal_length,
+            clipping_range=(cam.near, cam.far),
+            vertical_aperture=v_aperture,
+            horizontal_aperture=h_aperture,
+        )
+        # Physically-based depth-of-field (IsaacSim-only): f_stop>0 enables defocus blur.
+        if isaacsim_cfg and isaacsim_cfg.f_stop is not None:
+            kwargs["f_stop"] = isaacsim_cfg.f_stop
+        if isaacsim_cfg and isaacsim_cfg.focus_distance is not None:
+            kwargs["focus_distance"] = isaacsim_cfg.focus_distance
+        return sim_utils.PinholeCameraCfg(**kwargs)
+
+    def _create_sensors(self) -> None:
+        """Register the TiledCameras (built pre-clone) into the shared SensorManager."""
+        cameras = self.sensor_config
+        if not cameras:
+            return
+        from holosoma.simulator.shared.camera_sensor import SensorManager
+
+        sim = self.simulator_config.sim
+        self.sensor_manager = SensorManager(self.sim_device, control_hz=sim.fps / sim.control_decimation_steps)
+        for cam_name, cam in cameras.items():
+            self.sensor_manager.register_camera(cam_name, cam)
+
+    def render_sensors(self) -> None:
+        """Cache each due TiledCamera's RGB as a ``[N,H,W,3]`` uint8 frame into its buffer.
+
+        TiledCameras are RTX sensors the sim already updates in its own render pass
+        (``scene.update`` in ``simulate_at_each_physics_step``); this reads that output, drops
+        alpha, and writes a ``[N,H,W,3]`` uint8 frame once per control step (honoring
+        ``update_decimation``), mirroring the other backends' render -> buffer -> read flow."""
+        if self.sensor_manager is None:
+            return
+        for runtime in self.sensor_manager.collect_due():
+            out = self._tiled_cameras[runtime.name].data.output
+            if "rgb" in runtime.config.data_types:
+                rgb = out["rgb"][..., :3]  # [N,H,W,3], drop alpha
+                if rgb.dtype != torch.uint8:
+                    rgb = rgb.clamp(0, 255).to(torch.uint8)
+                runtime.set_buffer("rgb", rgb)
+            if "depth" in runtime.config.data_types:
+                # distance_to_image_plane is float32 meters, image-plane. No-hit handling (raw +inf,
+                # clamp to far, or zero) is done by the TiledCamera itself via depth_clipping_behavior
+                # (see _tiled_camera_cfg). Ensure a trailing channel dim -> [N,H,W,1].
+                depth = out["distance_to_image_plane"].to(torch.float32)
+                runtime.set_buffer("depth", depth if depth.ndim == 4 else depth.unsqueeze(-1))
 
     def _get_base_body_name(self, preference_order: list[str]) -> str:
         """Get the base body name with fallback logic.
@@ -687,7 +837,14 @@ class IsaacSim(BaseSimulator):
 
     def create_envs(self, num_envs, env_origins, base_init_state):
         self.num_envs = num_envs
-        self.env_origins = env_origins
+        # IsaacSim does NOT honor the passed env_origins: InteractiveScene clones the envs on its own
+        # env_spacing grid (built in __init__), and every internal placement (robot/object poses,
+        # terrain) uses self.scene.env_origins, not the argument. Storing the passed value here left
+        # self.env_origins disagreeing with where envs actually are (unlike mujoco/isaacgym, where the
+        # passed origins ARE the placement) — so callers reading sim.env_origins (e.g. a multi-env
+        # camera harness pinning a robot relative to its env) landed off from the grid-placed scene.
+        # Reconcile to the real grid so sim.env_origins means the same thing on every backend.
+        self.env_origins = self.scene.env_origins
         self.base_init_state = base_init_state
 
         return self.scene, self._robot
@@ -819,6 +976,7 @@ class IsaacSim(BaseSimulator):
             attachment_body_names=gantry_cfg.attachment_body_names,
             cfg=gantry_cfg,
         )
+        self.virtual_gantry.register_hooks(self.hooks)
 
         # Initialize bridge system using base class helper
         self._init_bridge()
@@ -826,6 +984,7 @@ class IsaacSim(BaseSimulator):
         # Setup video recording after scene is ready
         if self.video_recorder:
             self.video_recorder.setup_recording()
+            self.video_recorder.register_hooks(self.hooks)
 
         # Initialize robot tensors
         self.refresh_sim_tensors()
@@ -870,7 +1029,7 @@ class IsaacSim(BaseSimulator):
 
         # Issue: data.net_forces_w_history is not cleared after a reset.
         # Solution: We only read the most recent decimation_factor steps.
-        control_decimation = self.simulator_config.sim.control_decimation
+        control_decimation = self.simulator_config.sim.control_decimation_steps
         effective_history_length = min(control_decimation, self.simulator_config.contact_sensor_history_length)
         self.contact_forces_history[:, :effective_history_length, :, :] = self.contact_sensor.data.net_forces_w_history[
             :, :effective_history_length, self._contact_to_robot_body_ids
@@ -900,23 +1059,29 @@ class IsaacSim(BaseSimulator):
         has_video_recording = self.video_recorder is not None and self.video_recorder.is_recording
         is_rendering = self.sim.has_gui() or self.sim.has_rtx_sensors() or has_video_recording
 
-        # Apply virtual gantry forces before physics step
-        if self.virtual_gantry:
-            self.virtual_gantry.step()
-
-        # Step bridge for updated torques before physics step using base class helper
-        self._step_bridge()
-
         self.scene.write_data_to_sim()
 
-        # simulate
-        self.sim.step(render=False)
+        # Render on the render-interval when the GUI or a sensor needs it, INLINE via
+        # sim.step(render=render_now). IsaacLab's self.render() only flushes fabric / drives the RTX
+        # render products when sim.render_mode >= PARTIAL_RENDERING; at NO_GUI_OR_RENDERING (-1) it is
+        # a hard no-op. render_mode is fixed at SimulationContext.__init__ from the launch flags:
+        # headless + enable_cameras => offscreen => PARTIAL (the normal camera path, incl. headless
+        # training), a GUI => FULL, but headless WITHOUT cameras — or any caller that reaches the sim
+        # before enable_cameras/headless are both set at launch — lands at -1, which is terminal
+        # (set_render_mode refuses to leave it). sim.step(render=render_now) drives the low-level
+        # render regardless of render_mode, so RTX sensors (TiledCameras) track the current poses even
+        # in that -1 state, instead of returning the stale first frame. (Equivalent to IsaacLab's
+        # canonical split step(render=False)+render() whenever render_mode is already >= PARTIAL.)
+        render_now = is_rendering and self._sim_step_counter % self.simulator_config.sim.render_interval_steps == 0
 
-        # Render between steps only IF the GUI or sensor need it
-        # note: we assume the render interval to be the shortest accepted rendering interval.
-        #    If a camera needs rendering at a faster frequency, this will lead to unexpected behavior.
-        if self._sim_step_counter % self.simulator_config.sim.render_interval == 0 and is_rendering:
-            self.render()
+        # simulate
+        self.sim.step(render=render_now)
+
+        # Debug-viz overlay (GUI only): the inline render above replaces the old self.render() call,
+        # so redraw the debug lines here when a render happened and debug viz is on.
+        if render_now and self.debug_viz_enabled:
+            self.clear_lines()
+            self.draw_debug_viz()
 
         # update buffers at sim
         self.scene.update(dt=1.0 / self.simulator_config.sim.fps)
@@ -935,10 +1100,6 @@ class IsaacSim(BaseSimulator):
             current_base_vel = self.robot_root_states[:, 7:10]
             self.base_linear_acc = (current_base_vel - self.prev_base_lin_vel) / self.sim_dt
             self.prev_base_lin_vel = current_base_vel.clone()
-
-        # Call video recorder capture frame if recording is active
-        if self.video_recorder:
-            self.capture_video_frame()
 
     def setup_viewer(self):
         self.viewer = self.viewport_camera_controller

@@ -666,6 +666,17 @@ class BasePolicy:
             if get_ready:
                 q_target = self.get_init_target(robot_state_data)
                 self.init_count = min(self.init_count, 500)
+                # Interpolation phase: optionally command stiffer gains so the
+                # robot holds pose firmly while ramping to the start pose. Scale
+                # the policy gains by interp_gain_scale (1.0 => unchanged) and
+                # ride the existing kp_override/kd_override path; the policy phase
+                # below keeps its own gains. Composes with kp_level in the driver.
+                scale = getattr(self.robot_config, "interp_gain_scale", 1.0)
+                if scale != 1.0:
+                    if self.robot_config.motor_kp is not None:
+                        kp_override = np.asarray(self.robot_config.motor_kp, dtype=float) * scale
+                    if self.robot_config.motor_kd is not None:
+                        kd_override = np.asarray(self.robot_config.motor_kd, dtype=float) * scale
             elif not use_policy:
                 manual_cmd = self._get_manual_command(robot_state_data)
                 if manual_cmd is not None:
