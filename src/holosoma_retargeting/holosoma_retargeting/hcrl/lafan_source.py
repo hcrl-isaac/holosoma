@@ -59,8 +59,7 @@ def to_holosoma(
 def head_angles(bvh_path: Path) -> np.ndarray:
     """The head's yaw and pitch relative to the chest, as T1's ``AAHead_yaw`` and ``Head_pitch`` targets.
 
-    Keypoint positions cannot carry this: Neck and Head lie on the neck axis, so turning the head moves
-    neither. The BVH's rotations do. Needs the LAFAN1 ``lafan1`` reader package on the path.
+    Needs the LAFAN1 repository's ``lafan1`` reader on ``PYTHONPATH``; it is not a declared dependency.
 
     Args:
         bvh_path: The take's BVH file.

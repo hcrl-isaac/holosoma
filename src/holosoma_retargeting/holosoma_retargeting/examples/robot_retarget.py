@@ -859,6 +859,8 @@ def main(cfg: RetargetingConfig) -> None:
         _head = Path(data_path) / f"{task_name}_head.npy"
         if data_format == "lafan" and robot == "t1" and _head.exists():
             _yaw_pitch = np.load(_head)
+            if len(_yaw_pitch) != len(human_joints):
+                raise ValueError(f"{_head.name} has {len(_yaw_pitch)} frames but the source has {len(human_joints)}")
             retargeter.joint_angle_targets["AAHead_yaw"] = _yaw_pitch[:, 0]
             retargeter.joint_angle_targets["Head_pitch"] = _yaw_pitch[:, 1]
         _m = {k: float(np.abs(v).mean()) for k, v in retargeter.joint_angle_targets.items()}
