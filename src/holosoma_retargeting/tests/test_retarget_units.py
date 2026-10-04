@@ -124,10 +124,19 @@ def test_an_explicit_default_wins_over_the_preset():
     assert parse_config([*args, "--terms.joint-angle-weight", "5.0"]).terms.joint_angle_weight == 5.0
 
 
-def test_t1_knee_flexion_is_capped_at_the_urdf_limit():
+@pytest.mark.parametrize(
+    ("joint", "side", "limit"),
+    [
+        ("Left_Knee_Pitch", 1, 2.18),
+        ("Right_Knee_Pitch", 1, 2.18),
+        ("Left_Elbow_Yaw", 0, -2.27),
+        ("Right_Elbow_Yaw", 1, 2.27),
+    ],
+)
+def test_t1_flexion_is_capped_at_the_urdf_limit(joint, side, limit):
     model = mujoco.MjModel.from_xml_path(str(T1_MODEL))
-    ub = RobotConfig(robot_type="t1").MANUAL_UB
-    for knee in ("Left_Knee_Pitch", "Right_Knee_Pitch"):
-        adr = int(model.jnt_qposadr[model.joint(knee).id])
-        assert ub[str(adr)] == pytest.approx(2.18)
-        assert model.jnt_range[model.joint(knee).id][1] > 2.18
+    config = RobotConfig(robot_type="t1")
+    bounds = config.MANUAL_UB if side else config.MANUAL_LB
+    adr = int(model.jnt_qposadr[model.joint(joint).id])
+    assert bounds[str(adr)] == pytest.approx(limit)
+    assert abs(model.jnt_range[model.joint(joint).id][side]) > abs(limit)

@@ -235,6 +235,9 @@ class RobotConfig:
                     "35": -0.05,
                 }
             )
+        elif self.robot_type == "t1":
+            # the deployed t1.urdf's elbow flexion limit (left Elbow_Yaw flexes negative)
+            base.update({"12": -2.27})
 
         return base
 
@@ -262,8 +265,8 @@ class RobotConfig:
                 }
             )
         elif self.robot_type == "t1":
-            # match the deployed t1.urdf knee flexion limit, tighter than the bundled model's 2.34
-            base.update({"21": 2.18, "27": 2.18})  # left, right knee pitch
+            # the deployed t1.urdf's knee and elbow flexion limits, tighter than the bundled model's 2.34 and 2.44
+            base.update({"21": 2.18, "27": 2.18, "16": 2.27})  # left, right knee pitch, right elbow yaw
 
         return base
 

@@ -774,10 +774,15 @@ def main(cfg: RetargetingConfig) -> None:
         if _tw > 0:
             retargeter.Q_diag[retargeter._resolve_joint_rows(("Left_Elbow_Pitch", "Right_Elbow_Pitch"))] = _tw
         _cap = terms.elbow_cap
-        retargeter.q_a_lb[retargeter._resolve_joint_rows(("Left_Elbow_Yaw",))] = -_cap
-        retargeter.q_a_ub[retargeter._resolve_joint_rows(("Right_Elbow_Yaw",))] = _cap
+        if _cap is not None:
+            _left = retargeter._resolve_joint_rows(("Left_Elbow_Yaw",))
+            _right = retargeter._resolve_joint_rows(("Right_Elbow_Yaw",))
+            retargeter.q_a_lb[_left] = np.maximum(retargeter.q_a_lb[_left], -_cap)
+            retargeter.q_a_ub[_right] = np.minimum(retargeter.q_a_ub[_right], _cap)
         logger.info(
-            "T1 manual regularizers: waist cost %.2f, elbow flexion cap %.2f", retargeter.Q_diag[_rows][0], _cap
+            "T1 manual regularizers: waist cost %.2f, elbow flexion cap %s",
+            retargeter.Q_diag[_rows][0],
+            "the robot limit" if _cap is None else f"{_cap:.2f}",
         )
 
     # the root quaternion rows (qpos 3..6) otherwise get a knee's scalar smoothing, which lets the torso
