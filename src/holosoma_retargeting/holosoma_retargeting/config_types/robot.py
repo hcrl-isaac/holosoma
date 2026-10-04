@@ -74,6 +74,9 @@ class RobotConfig:
 
     # Joint definitions (optional overrides)
     foot_sticking_links: list[str] | None = None
+    ankle_joints: dict[str, list[str]] | None = None
+    sole_links: dict[str, list[str]] | None = None
+    foot_links: dict[str, str] | None = None
 
     # Manual joint limits
     manual_lb: dict[str, float] | None = None
@@ -161,6 +164,57 @@ class RobotConfig:
         doc="Get foot sticking links - use override if provided, else use robot_type default.",
     )
 
+    def _ankle_joints(self) -> dict[str, list[str]]:
+        """Get per-side ankle joint names - use override if provided, else use robot_type default."""
+        if self.ankle_joints is not None:
+            return self.ankle_joints
+
+        if self.robot_type == "g1":
+            return {side: [f"{side}_ankle_pitch_joint", f"{side}_ankle_roll_joint"] for side in ("left", "right")}
+        if self.robot_type == "t1":
+            return {
+                side: [f"{side.capitalize()}_Ankle_Pitch", f"{side.capitalize()}_Ankle_Roll"]
+                for side in ("left", "right")
+            }
+        raise ValueError(f"Invalid robot type: {self.robot_type}")
+
+    ANKLE_JOINTS = property(
+        _ankle_joints,
+        doc="Get per-side ankle joint names - use override if provided, else use robot_type default.",
+    )
+
+    def _sole_links(self) -> dict[str, list[str]]:
+        """Get per-side sole contact spheres - a superset of FOOT_STICKING_LINKS including the toe."""
+        if self.sole_links is not None:
+            return self.sole_links
+
+        if self.robot_type == "g1":
+            return {side: [f"{side}_ankle_roll_sphere_{i}_link" for i in range(1, 6)] for side in ("left", "right")}
+        if self.robot_type == "t1":
+            return {side: [f"{side}_foot_sphere_{i}_link" for i in range(1, 6)] for side in ("left", "right")}
+        raise ValueError(f"Invalid robot type: {self.robot_type}")
+
+    SOLE_LINKS = property(
+        _sole_links,
+        doc="Get per-side sole contact spheres - use override if provided, else use robot_type default.",
+    )
+
+    def _foot_links(self) -> dict[str, str]:
+        """Get the per-side rigid foot body, whose local +z is the sole plane normal."""
+        if self.foot_links is not None:
+            return self.foot_links
+
+        if self.robot_type == "g1":
+            return {side: f"{side}_ankle_roll_link" for side in ("left", "right")}
+        if self.robot_type == "t1":
+            return {side: f"{side}_foot_link" for side in ("left", "right")}
+        raise ValueError(f"Invalid robot type: {self.robot_type}")
+
+    FOOT_LINKS = property(
+        _foot_links,
+        doc="Get the per-side rigid foot body - use override if provided, else use robot_type default.",
+    )
+
     def _manual_lb(self) -> dict[str, float]:
         """Get manual lower bounds."""
         if self.manual_lb is not None:
@@ -181,6 +235,9 @@ class RobotConfig:
                     "35": -0.05,
                 }
             )
+        elif self.robot_type == "t1":
+            # the deployed t1.urdf's elbow flexion limit (left Elbow_Yaw flexes negative)
+            base.update({"12": -2.27})
 
         return base
 
@@ -207,6 +264,9 @@ class RobotConfig:
                     "35": 0.05,
                 }
             )
+        elif self.robot_type == "t1":
+            # the deployed t1.urdf's knee and elbow flexion limits, tighter than the bundled model's 2.34 and 2.44
+            base.update({"21": 2.18, "27": 2.18, "16": 2.27})  # left, right knee pitch, right elbow yaw
 
         return base
 
@@ -230,8 +290,8 @@ class RobotConfig:
 
         if self.robot_type == "g1":
             return np.arange(19)
-        if self.robot_type == "t1":
-            return np.concatenate([np.arange(7), np.arange(11, 23)])
+        if self.robot_type == "t1":  # floating base + the 12 leg joints (qpos 18..29), as for the G1
+            return np.concatenate([np.arange(7), np.arange(18, 30)])
         # Default: return empty array if robot type not defined (nominal tracking not used)
         return np.array([], dtype=int)
 

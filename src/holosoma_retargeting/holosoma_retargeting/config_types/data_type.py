@@ -173,6 +173,27 @@ SMPLX_DEMO_JOINTS = [
     "R_Wrist",
 ]
 
+
+# G1 FK world link positions as a robot-sized pseudo-source (identity mapping), so already-retargeted G1
+# motions can be re-projected onto reconstructed terrain under contact and penetration constraints.
+G1FK_DEMO_JOINTS = [
+    "pelvis_contour_link",
+    "left_hip_pitch_link",
+    "left_knee_link",
+    "left_ankle_intermediate_1_link",
+    "left_ankle_roll_sphere_5_link",
+    "right_hip_pitch_link",
+    "right_knee_link",
+    "right_ankle_intermediate_1_link",
+    "right_ankle_roll_sphere_5_link",
+    "left_shoulder_roll_link",
+    "left_elbow_link",
+    "left_sphere_hand_link",
+    "right_shoulder_roll_link",
+    "right_elbow_link",
+    "right_sphere_hand_link",
+]
+
 # Joint mappings - organized by (data_format, robot_type)
 JOINTS_MAPPINGS = {
     ("lafan", "g1"): {
@@ -193,6 +214,8 @@ JOINTS_MAPPINGS = {
         "RightHand": "right_rubber_hand_link",
     },
     ("lafan", "t1"): {
+        "LeftForeArm": "left_hand_link",
+        "RightForeArm": "right_hand_link",
         "Spine1": "Trunk",
         "LeftUpLeg": "Hip_Pitch_Left",
         "RightUpLeg": "Hip_Pitch_Right",
@@ -200,8 +223,6 @@ JOINTS_MAPPINGS = {
         "RightLeg": "Shank_Right",
         "LeftArm": "AL1",
         "RightArm": "AR1",
-        "LeftForeArm": "left_hand_link",
-        "RightForeArm": "right_hand_link",
         "LeftFoot": "Ankle_Cross_Left",
         "RightFoot": "Ankle_Cross_Right",
         "LeftToeBase": "left_foot_sphere_5_link",
@@ -226,16 +247,18 @@ JOINTS_MAPPINGS = {
         "L_Wrist": "left_rubber_hand_link",
         "R_Wrist": "right_rubber_hand_link",
     },
+    # T1 elbow flexion hinges at *_hand_link (palm = *_hand_sphere_link). The Trunk origin sits 0.116 m
+    # above the hips against the SMPL pelvis's 0.06, so the pelvis maps to pelvis_kp at that height.
     ("smplh", "t1"): {
-        "Pelvis": "Trunk",
+        "L_Elbow": "left_hand_link",
+        "R_Elbow": "right_hand_link",
+        "Pelvis": "pelvis_kp",
         "L_Hip": "Hip_Pitch_Left",
         "R_Hip": "Hip_Pitch_Right",
         "L_Knee": "Shank_Left",
         "R_Knee": "Shank_Right",
         "L_Shoulder": "AL1",
         "R_Shoulder": "AR1",
-        "L_Elbow": "left_hand_link",
-        "R_Elbow": "right_hand_link",
         "L_Ankle": "Ankle_Cross_Left",
         "R_Ankle": "Ankle_Cross_Right",
         "L_Toe": "left_foot_sphere_5_link",
@@ -260,6 +283,24 @@ JOINTS_MAPPINGS = {
         "L_Wrist": "left_rubber_hand_link",
         "R_Wrist": "right_rubber_hand_link",
     },
+    ("smplx", "t1"): {
+        "L_Elbow": "left_hand_link",
+        "R_Elbow": "right_hand_link",
+        "Pelvis": "pelvis_kp",
+        "L_Hip": "Hip_Pitch_Left",
+        "R_Hip": "Hip_Pitch_Right",
+        "L_Knee": "Shank_Left",
+        "R_Knee": "Shank_Right",
+        "L_Shoulder": "AL1",
+        "R_Shoulder": "AR1",
+        "L_Ankle": "Ankle_Cross_Left",
+        "R_Ankle": "Ankle_Cross_Right",
+        "L_Foot": "left_foot_sphere_5_link",
+        "R_Foot": "right_foot_sphere_5_link",
+        "L_Wrist": "left_hand_sphere_link",
+        "R_Wrist": "right_hand_sphere_link",
+    },
+    ("g1fk", "g1"): {j: j for j in G1FK_DEMO_JOINTS},
     ("mocap", "g1"): {
         "Spine1": "pelvis_contour_link",
         "LeftUpLeg": "left_hip_pitch_link",
@@ -296,11 +337,27 @@ JOINTS_MAPPINGS = {
     },
 }
 
-# Data format specific constants
+
+def root_keypoint(demo_joints: list) -> str:
+    """Find the root/pelvis keypoint in a joint list.
+
+    Args:
+        demo_joints: Source keypoint names of one data format.
+
+    Returns:
+        The first of ``Spine1``, ``Pelvis`` or ``pelvis_contour_link`` present in the list.
+    """
+    for name in ("Spine1", "Pelvis", "pelvis_contour_link"):
+        if name in demo_joints:
+            return name
+    raise ValueError(f"No known root keypoint in demo joints: {demo_joints[:5]}...")
+
+
 TOE_NAMES_BY_FORMAT = {
     "lafan": ["LeftToeBase", "RightToeBase"],
     "smplh": ["L_Toe", "R_Toe"],
     "mocap": ["LeftToeBase", "RightToeBase"],
+    "g1fk": ["left_ankle_roll_sphere_5_link", "right_ankle_roll_sphere_5_link"],
     "smplx": ["L_Foot", "R_Foot"],
 }
 
@@ -318,6 +375,9 @@ DATA_FORMAT_CONSTANTS: dict[str, FormatConstants] = {
     "mocap": {
         "default_human_height": 1.78,
     },
+    "g1fk": {
+        "default_human_height": 1.32,  # the G1's height, so smpl_scale is 1 for a robot-sized source
+    },
 }
 
 # Unified registry: Maps format name to demo joints
@@ -327,6 +387,7 @@ DEMO_JOINTS_REGISTRY: dict[str, list[str]] = {
     "lafan": LAFAN_DEMO_JOINTS,
     "smplh": SMPLH_DEMO_JOINTS,
     "mocap": MOCAP_DEMO_JOINTS,
+    "g1fk": G1FK_DEMO_JOINTS,
     "smplx": SMPLX_DEMO_JOINTS,
 }
 

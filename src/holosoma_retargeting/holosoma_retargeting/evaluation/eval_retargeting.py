@@ -27,6 +27,7 @@ if str(src_root) not in sys.path:
 from holosoma_retargeting.config_types.data_type import (  # noqa: E402
     SMPLH_DEMO_JOINTS,
     MotionDataConfig,
+    root_keypoint,
 )
 from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
 from holosoma_retargeting.src.mujoco_utils import _world_mesh_from_geom  # type: ignore[import-not-found]  # noqa: E402
@@ -168,7 +169,7 @@ class RetargetingEvaluator:
 
         obj_Vs, obj_Fs, v_acc = [], [], 0
         for gid in range(m.ngeom):
-            if m.geom_type[gid] != mujoco.mjtGeom.mjGEOM_MESH:
+            if int(m.geom_type[gid]) != mujoco.mjtGeom.mjGEOM_MESH:
                 continue  # mesh-only
             name = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, gid) or ""
             if self.object_name not in name:
@@ -613,7 +614,7 @@ class RetargetingEvaluator:
             toe_names = ["LeftToeBase", "RightToeBase"]
             human_joints = np.load(str(npy_path))
             human_joints = transform_y_up_to_z_up(human_joints)
-            spine_joint_idx = self.demo_joints.index("Spine1")
+            spine_joint_idx = self.demo_joints.index(root_keypoint(self.demo_joints))
             # LAFAN-specific spine adjustment
             human_joints[:, spine_joint_idx, -1] -= 0.06
             smpl_scale = getattr(self.constants, "DEFAULT_SCALE_FACTOR", None) or 1.0

@@ -20,11 +20,8 @@ classifiers = [
     "Intended Audience :: Science/Research",
 ]
 dependencies = [
-    # Needs to ping numpy to 2.3.5;
-    # reason: later numpy version such as 2.4 will trigger
-    # "TypeError: only 0-dimensional arrays can be converted to Python scalars"
-    # in yourdf/urdf.py::1078 when converting float(q)
-    "numpy==2.3.5",
+    # isaaclab is co-installed and needs numpy<2; numpy 2.4 would also break yourdfpy's float(q) (urdf.py:1078)
+    "numpy>=1.26,<2",
     "torch",
     "tqdm",
     "scipy",
@@ -32,13 +29,17 @@ dependencies = [
     "trimesh",
     "smplx",
     "jinja2",
-    "mujoco",
     "viser",
     "robot_descriptions",
     "yourdfpy",
-    "cvxpy",
+    # mujoco 3.12 solves within ~0.06 rad of 3.10 rather than bit-identically, and every result records its stack
+    "mujoco>=3.10",
+    "cvxpy==1.5.4",  # 1.6+ wheels need numpy>=2
+    "clarabel==0.11.1",
     "libigl",
     "tyro",
+    "joblib",
+    "pandas",
 ]
 
 [project.optional-dependencies]
@@ -68,4 +69,36 @@ source-include = [
     "holosoma_retargeting/**/*.pt",
     "holosoma_retargeting/**/*.pkl",
     "holosoma_retargeting/**/*.md",
+]
+# OMOMO object models that data_utils/make_omomo_objects.py derives from the downloaded dataset into models/;
+# they sit beside the bundled ones but are not part of the package
+source-exclude = [
+    "holosoma_retargeting/models/clothesstand/**",
+    "holosoma_retargeting/models/t1/t1_23dof_w_clothesstand.xml",
+    "holosoma_retargeting/models/floorlamp/**",
+    "holosoma_retargeting/models/t1/t1_23dof_w_floorlamp.xml",
+    "holosoma_retargeting/models/largetable/**",
+    "holosoma_retargeting/models/t1/t1_23dof_w_largetable.xml",
+    "holosoma_retargeting/models/monitor/**",
+    "holosoma_retargeting/models/t1/t1_23dof_w_monitor.xml",
+    "holosoma_retargeting/models/mop/**",
+    "holosoma_retargeting/models/t1/t1_23dof_w_mop.xml",
+    "holosoma_retargeting/models/plasticbox/**",
+    "holosoma_retargeting/models/t1/t1_23dof_w_plasticbox.xml",
+    "holosoma_retargeting/models/smallbox/**",
+    "holosoma_retargeting/models/t1/t1_23dof_w_smallbox.xml",
+    "holosoma_retargeting/models/smalltable/**",
+    "holosoma_retargeting/models/t1/t1_23dof_w_smalltable.xml",
+    "holosoma_retargeting/models/suitcase/**",
+    "holosoma_retargeting/models/t1/t1_23dof_w_suitcase.xml",
+    "holosoma_retargeting/models/trashcan/**",
+    "holosoma_retargeting/models/t1/t1_23dof_w_trashcan.xml",
+    "holosoma_retargeting/models/tripod/**",
+    "holosoma_retargeting/models/t1/t1_23dof_w_tripod.xml",
+    "holosoma_retargeting/models/vacuum/**",
+    "holosoma_retargeting/models/t1/t1_23dof_w_vacuum.xml",
+    "holosoma_retargeting/models/whitechair/**",
+    "holosoma_retargeting/models/t1/t1_23dof_w_whitechair.xml",
+    "holosoma_retargeting/models/woodchair/**",
+    "holosoma_retargeting/models/t1/t1_23dof_w_woodchair.xml",
 ]

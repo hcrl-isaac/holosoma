@@ -212,6 +212,7 @@ def preprocess_motion_data(
     scale=0.714,
     mat_height=0.1,
     object_poses=None,
+    object_full_scale=False,
 ):
     """
     Preprocess human joints and object poses for retargeting.
@@ -222,6 +223,7 @@ def preprocess_motion_data(
         retargeter: Retargeting object with smplh_joint2idx attribute.
         scale (float): Scaling factor.
         normalize_height (bool): Whether to normalize human joint heights.
+        object_full_scale (bool): Scale the object's whole position with the human, not only its xy and z motion.
 
     Returns:
         tuple: (human_joints_scaled, object_poses_scaled, object_moving_frame_idx).
@@ -241,10 +243,15 @@ def preprocess_motion_data(
     human_joints = human_joints * scale
 
     if object_poses is not None:
-        object_poses[:, -3:-1] = object_poses[:, -3:-1] * scale
-        object_z0 = object_poses[0, -1]
-        dz_scale = (object_poses[:, -1] - object_z0) * scale
-        object_poses[:, -1] = object_z0 + dz_scale
+        # by default the object keeps its absolute height, but a human shrunk to robot size can only reach
+        # an object shrunk with it
+        if object_full_scale:
+            object_poses[:, -3:] = object_poses[:, -3:] * scale
+        else:
+            object_poses[:, -3:-1] = object_poses[:, -3:-1] * scale
+            object_z0 = object_poses[0, -1]
+            dz_scale = (object_poses[:, -1] - object_z0) * scale
+            object_poses[:, -1] = object_z0 + dz_scale
 
         object_moving_frame_idx = extract_object_first_moving_frame(object_poses)
 
@@ -710,10 +717,41 @@ def extract_foot_sticking_sequence_velocity(smpl_joints, demo_joints, foot_names
     left_toe_velocity = np.concatenate([[velocity_threshold + 1], left_toe_velocity])
     right_toe_velocity = np.concatenate([[velocity_threshold + 1], right_toe_velocity])
 
-    return [
-        {"L_Toe": left_toe_velocity[i] <= velocity_threshold, "R_Toe": right_toe_velocity[i] <= velocity_threshold}
-        for i in range(len(smpl_joints))
-    ]
+    # Hysteresis + a minimum run length: a raw threshold flickers around foot strike, and each flip
+    # engages or releases a hard xy lock, which the whole body pays for as a hop.
+    left = _stance_with_hysteresis(left_toe_velocity, velocity_threshold)
+    right = _stance_with_hysteresis(right_toe_velocity, velocity_threshold)
+    return [{"L_Toe": bool(left[i]), "R_Toe": bool(right[i])} for i in range(len(smpl_joints))]
+
+
+def _stance_with_hysteresis(speed, threshold, release_ratio=2.0, min_run=3):
+    """Stance mask from a per-frame speed: enter below ``threshold``, leave above ``release_ratio`` x it.
+
+    Args:
+        speed: Per-frame foot speed, shape (T,).
+        threshold: Speed below which a swing foot enters stance.
+        release_ratio: Multiple of ``threshold`` above which a stance foot leaves it.
+        min_run: Runs of either state shorter than this many frames take the surrounding state.
+
+    Returns:
+        Boolean stance mask, shape (T,).
+    """
+    stance = np.zeros(len(speed), dtype=bool)
+    on = False
+    for i, v in enumerate(speed):
+        on = v <= threshold if not on else v <= release_ratio * threshold
+        stance[i] = on
+    # drop runs (of either state) shorter than min_run by flipping them to the surrounding state
+    for _ in range(2):
+        i = 0
+        while i < len(stance):
+            j = i
+            while j < len(stance) and stance[j] == stance[i]:
+                j += 1
+            if j - i < min_run and i > 0 and j < len(stance):
+                stance[i:j] = stance[i - 1]
+            i = j
+    return stance
 
 
 def transform_y_up_to_z_up(points):
@@ -763,6 +801,18 @@ def estimate_human_orientation(human_joints, joint_names, frame_idx=0):
     Returns:
         np.ndarray: Quaternion [w, x, y, z] representing the human's global orientation
     """
+    # g1fk (robot-FK pseudo-source) has no spine keypoint, so yaw comes from the hip lateral axis
+    if "pelvis_contour_link" in joint_names:
+        lhip = human_joints[frame_idx, joint_names.index("left_hip_pitch_link")]
+        rhip = human_joints[frame_idx, joint_names.index("right_hip_pitch_link")]
+        lat = lhip - rhip
+        lat[2] = 0.0
+        facing = np.cross(lat, np.array([0.0, 0.0, 1.0]))
+        n = np.linalg.norm(facing)
+        facing = facing / n if n > 1e-6 else np.array([1.0, 0.0, 0.0])
+        yaw = np.arctan2(facing[1], facing[0])
+        return np.array([np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)])  # wxyz
+
     # For LAFAN
     if "Hips" in joint_names:
         hips_idx = joint_names.index("Hips")
