@@ -29,6 +29,7 @@ from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
 from holosoma_retargeting.config_types.task import TaskConfig  # noqa: E402
 from holosoma_retargeting.config_types.terms import SolverTerms, resolve_terms  # noqa: E402
 from holosoma_retargeting.hcrl import ball_contact  # noqa: E402
+from holosoma_retargeting.hcrl.source_angles import t1_joint_angle_targets  # noqa: E402
 from holosoma_retargeting.src.interaction_mesh_retargeter import (  # noqa: E402
     InteractionMeshRetargeter,  # type: ignore[import-not-found]
 )
@@ -477,6 +478,20 @@ def convert_object_poses_to_mujoco_order(object_poses: np.ndarray) -> np.ndarray
     return object_poses[:, [4, 5, 6, 0, 1, 2, 3]]
 
 
+def _smooth_rows(retargeter: InteractionMeshRetargeter) -> np.ndarray:
+    """The retargeter's velocity-smoothing weight as a per-row vector, converting a scalar in place.
+
+    Args:
+        retargeter: The retargeter whose ``smooth_weight`` to read.
+
+    Returns:
+        ``smooth_weight`` itself, shape ``(nq_a,)``; writes into it change the solve.
+    """
+    if np.isscalar(retargeter.smooth_weight):
+        retargeter.smooth_weight = np.full(retargeter.nq_a, float(retargeter.smooth_weight))
+    return retargeter.smooth_weight
+
+
 def build_retargeter_kwargs_from_config(
     retargeter_config: RetargeterConfig,
     constants: SimpleNamespace,
@@ -771,32 +786,25 @@ def main(cfg: RetargetingConfig) -> None:
     # nothing at constant velocity, so applying it generally smooths the solve without dragging motion.
     # hcrl: the root's quaternion rows (qpos 3..6) get the same scalar smoothing as a knee, so the
     # torso can swing frame to frame while the joints look smooth. Boost just those rows.
+    if terms.smooth_weight is not None:
+        retargeter.smooth_weight = float(terms.smooth_weight)
     _rootw = terms.root_smooth
-    if _rootw > 0 and retargeter.q_a_init_idx == -7 and np.isscalar(retargeter.smooth_weight):
-        _sv = np.full(retargeter.nq_a, float(retargeter.smooth_weight))
+    if _rootw > 0 and retargeter.q_a_init_idx == -7:
+        _sv = _smooth_rows(retargeter)
         _sv[3:7] = _rootw
-        retargeter.smooth_weight = _sv
         logger.info("Root-orientation smoothing weight: %.1f (joints %.2f)", _rootw, float(_sv[7]))
 
     # uniform velocity smoothing on every actuated joint (the per-joint weights below still override)
     _jsm = terms.joint_smooth
     if _jsm > 0 and retargeter.q_a_init_idx == -7:
-        if np.isscalar(retargeter.smooth_weight):
-            retargeter.smooth_weight = np.full(retargeter.nq_a, float(retargeter.smooth_weight))
-        retargeter.smooth_weight[7:] = _jsm
+        _smooth_rows(retargeter)[7:] = _jsm
         logger.info("Joint smoothing weight (all actuated): %.1f", _jsm)
 
     # hcrl: the upper-arm twist (T1 Elbow_Pitch) is unobserved by keypoints and flips between the two
     # elbow-swivel solutions in a frame; a per-joint velocity smoothing weight damps that flip.
     _tws = terms.twist_smooth
     if _tws > 0 and retargeter.q_a_init_idx == -7:
-        if np.isscalar(retargeter.smooth_weight):
-            retargeter.smooth_weight = np.full(retargeter.nq_a, float(retargeter.smooth_weight))
-        for _jn in ("Left_Elbow_Pitch", "Right_Elbow_Pitch"):
-            try:
-                retargeter.smooth_weight[retargeter.robot_model.jnt_qposadr[retargeter.robot_model.joint(_jn).id]] = _tws
-            except KeyError:
-                pass
+        _smooth_rows(retargeter)[retargeter._resolve_joint_rows(("Left_Elbow_Pitch", "Right_Elbow_Pitch"))] = _tws
         logger.info("Twist-joint smoothing weight: %.1f", _tws)
 
     # self-collision shaping: per-iteration escape cap, soft margin repulsion
@@ -812,12 +820,20 @@ def main(cfg: RetargetingConfig) -> None:
     # straight-arm twist prior: weight fades to zero once the source elbow bends past ~25 deg
     _tp = terms.straight_twist_weight
     if _tp > 0 and robot == "t1":
-        from holosoma_retargeting.hcrl.source_angles import t1_joint_angle_targets as _tja
-        _ang = _tja(human_joints)
-        _bend = np.stack([np.abs(_ang["Left_Elbow_Yaw"]), np.abs(_ang["Right_Elbow_Yaw"])], 1)
-        retargeter.twist_prior_seq = _tp * np.clip(1.0 - np.degrees(_bend) / 25.0, 0.0, 1.0)
-        retargeter.twist_rows = [int(retargeter._resolve_joint_rows((n,))[0]) for n in ("Left_Elbow_Pitch", "Right_Elbow_Pitch")]
-        logger.info("Straight-arm twist prior: w=%.1f, active on %.0f%% of frames", _tp, 100 * (retargeter.twist_prior_seq > 0).any(1).mean())
+        _ang = t1_joint_angle_targets(human_joints, retargeter.demo_joints)
+        if "Left_Elbow_Yaw" in _ang and "Right_Elbow_Yaw" in _ang:
+            _bend = np.stack([np.abs(_ang["Left_Elbow_Yaw"]), np.abs(_ang["Right_Elbow_Yaw"])], 1)
+            retargeter.twist_prior_seq = _tp * np.clip(1.0 - np.degrees(_bend) / 25.0, 0.0, 1.0)
+            retargeter.twist_rows = [
+                int(retargeter._resolve_joint_rows((n,))[0]) for n in ("Left_Elbow_Pitch", "Right_Elbow_Pitch")
+            ]
+            logger.info(
+                "Straight-arm twist prior: w=%.1f, active on %.0f%% of frames",
+                _tp,
+                100 * (retargeter.twist_prior_seq > 0).any(1).mean(),
+            )
+        else:
+            logger.warning("Straight-arm twist prior is off: the %s source has no elbow chain", data_format)
 
     _apw = terms.arm_plane_weight
     if _apw > 0:
@@ -831,13 +847,8 @@ def main(cfg: RetargetingConfig) -> None:
     # shoulder pitch/roll overshoot the source arm's angular rate by ~1.5x on fast arm motion
     _shs = terms.shoulder_smooth
     if _shs > 0 and retargeter.q_a_init_idx == -7:
-        if np.isscalar(retargeter.smooth_weight):
-            retargeter.smooth_weight = np.full(retargeter.nq_a, float(retargeter.smooth_weight))
-        for _jn in ("Left_Shoulder_Pitch", "Left_Shoulder_Roll", "Right_Shoulder_Pitch", "Right_Shoulder_Roll"):
-            try:
-                retargeter.smooth_weight[retargeter.robot_model.jnt_qposadr[retargeter.robot_model.joint(_jn).id]] = _shs
-            except KeyError:
-                pass
+        _shoulders = ("Left_Shoulder_Pitch", "Left_Shoulder_Roll", "Right_Shoulder_Pitch", "Right_Shoulder_Roll")
+        _smooth_rows(retargeter)[retargeter._resolve_joint_rows(_shoulders)] = _shs
         logger.info("Shoulder smoothing weight: %.1f", _shs)
 
     _rr = terms.root_rate_weight  # measured: no improvement, off by default
@@ -847,14 +858,14 @@ def main(cfg: RetargetingConfig) -> None:
         logger.info("Root angular-rate prior: w=%.1f over %d frames", _rr, len(_root_quat_track))
 
     _jaw = terms.joint_angle_weight
-    if _jaw > 0:
-        from holosoma_retargeting.hcrl.source_angles import t1_joint_angle_targets
-
+    if _jaw > 0 and robot == "t1":
         retargeter.joint_angle_weight = _jaw
-        retargeter.joint_angle_targets = t1_joint_angle_targets(human_joints)
-        _m = {k: float(np.abs(v).mean()) for k, v in retargeter.joint_angle_targets.items()}
-        logger.info("Joint-angle tracking w=%.1f, source |angle| means: %s", _jaw,
-                    {k: round(v, 2) for k, v in _m.items()})
+        retargeter.joint_angle_targets = t1_joint_angle_targets(human_joints, retargeter.demo_joints)
+        if retargeter.joint_angle_targets:
+            _m = {k: round(float(np.abs(v).mean()), 2) for k, v in retargeter.joint_angle_targets.items()}
+            logger.info("Joint-angle tracking w=%.1f, source |angle| means: %s", _jaw, _m)
+        else:
+            logger.warning("Joint-angle tracking is off: the %s source has no hinge chains", data_format)
 
     # debug: record the mapped source points the solver actually optimizes against, so an overlay
     # shows the real targets rather than a reconstruction of them
@@ -880,15 +891,11 @@ def main(cfg: RetargetingConfig) -> None:
 
     if not retargeter.foot_lock.enable and terms.accel_damp > 0:
         retargeter.accel_damp_weight = float(terms.accel_damp)
-        if terms.smooth_weight is not None:
-            retargeter.smooth_weight = float(terms.smooth_weight)
         logger.info(
             "Temporal smoothing: accel_damp=%.2f smooth=%s", retargeter.accel_damp_weight, retargeter.smooth_weight
         )
 
-    # hcrl: the redundancy priors below are NOT foot-lock specific -- they were gated behind it, so only
-    # climbing clips ever got them and every other retarget rode its joint stops with the arm and pelvis
-    # parked wherever the null space landed. Applied generally now, still env-overridable.
+    # redundancy priors: without them the solve parks the arm and pelvis wherever the null space lands
     retargeter.joint_limit_barrier_weight = terms.joint_limit_weight
     retargeter.joint_limit_barrier_margin = terms.joint_limit_margin
     retargeter.joint_limit_barrier_margin_frac = terms.joint_limit_margin_frac
@@ -908,29 +915,13 @@ def main(cfg: RetargetingConfig) -> None:
     )
 
     if retargeter.foot_lock.enable and retargeter.q_a_init_idx == -7:
-        _w = np.full(retargeter.nq_a, float(retargeter.smooth_weight))
-        for _jn in ("left_ankle_roll_joint", "right_ankle_roll_joint"):
-            _w[retargeter.robot_model.jnt_qposadr[retargeter.robot_model.joint(_jn).id]] = 3.0
-        retargeter.smooth_weight = _w
+        # stance ankle roll gets velocity damping: with the toe anchored the lateral-lean null space flips
+        _rolls = tuple(joints[-1] for joints in retargeter.task_constants.ANKLE_JOINTS.values())
+        _smooth_rows(retargeter)[retargeter._resolve_joint_rows(_rolls)] = 3.0
         # 1.0 is the sweet spot: 4.0 carries momentum through landings (foot/root overshoot then correct)
         retargeter.accel_damp_weight = 1.0
-        # stance foot-orientation engagement: yaw frozen at entry + terrain-flat pitch/roll, ramped +
-        # slew-limited -- position pins alone snap the ankle attitude the frame a window binds
+        # position pins alone snap the ankle attitude the frame a stance window binds
         retargeter.foot_orient_weight = 30.0
-        # hcrl v3 (terrain-bfm §4.6): the G1's ROM is narrower than the human's and nothing penalized
-        # riding a stop, so the solve parked joints on their limits (waist_pitch 54% of frames,
-        # ankle_roll 35% in `edge`). Barrier keeps a margin; the pelvis/arm priors remove the null
-        # spaces that made the solver WANT the stop in the first place. Env-overridable so the weight
-        # ablation sweeps without editing code (--terms.joint-limit-weight 0 --terms.pelvis-weight 0 ... == the v1 corpus).
-        logger.info(
-            "hcrl v3 priors: jl_w=%.1f margin=%.3f/%.2f pelvis=%.1f arm=%.1f swing_ankle=%.2f",
-            retargeter.joint_limit_barrier_weight,
-            retargeter.joint_limit_barrier_margin,
-            retargeter.joint_limit_barrier_margin_frac,
-            retargeter.pelvis_track_weight,
-            retargeter.arm_reg_weight,
-            retargeter.swing_ankle_weight,
-        )
 
     # Preprocess motion data
     if task_type == "robot_only":
@@ -942,6 +933,7 @@ def main(cfg: RetargetingConfig) -> None:
             toe_names,
             scale=smpl_scale,
             object_poses=object_poses,
+            object_full_scale=terms.object_full_scale,
         )
 
     # Initialize robot pose

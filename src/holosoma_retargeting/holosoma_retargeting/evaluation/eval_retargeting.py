@@ -27,6 +27,7 @@ if str(src_root) not in sys.path:
 from holosoma_retargeting.config_types.data_type import (  # noqa: E402
     SMPLH_DEMO_JOINTS,
     MotionDataConfig,
+    root_keypoint,
 )
 from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
 from holosoma_retargeting.src.mujoco_utils import _world_mesh_from_geom  # type: ignore[import-not-found]  # noqa: E402

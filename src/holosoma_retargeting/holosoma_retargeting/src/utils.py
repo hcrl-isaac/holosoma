@@ -212,6 +212,7 @@ def preprocess_motion_data(
     scale=0.714,
     mat_height=0.1,
     object_poses=None,
+    object_full_scale=False,
 ):
     """
     Preprocess human joints and object poses for retargeting.
@@ -222,6 +223,7 @@ def preprocess_motion_data(
         retargeter: Retargeting object with smplh_joint2idx attribute.
         scale (float): Scaling factor.
         normalize_height (bool): Whether to normalize human joint heights.
+        object_full_scale (bool): Scale the object's whole position with the human, not only its xy and z motion.
 
     Returns:
         tuple: (human_joints_scaled, object_poses_scaled, object_moving_frame_idx).
@@ -241,10 +243,9 @@ def preprocess_motion_data(
     human_joints = human_joints * scale
 
     if object_poses is not None:
-        # Default keeps the object's ABSOLUTE height and scales only its z motion, which assumes the
-        # object's real-world size is meaningful next to the robot. When the human is shrunk to robot
-        # size the object must shrink with it, or the robot reaches for something out of range.
-        if os.environ.get("HOLOSOMA_OBJ_FULL_SCALE", "").lower() in ("1", "true", "yes"):
+        # the default keeps the object's absolute height (its real size next to the robot); a human shrunk to
+        # robot size needs the object shrunk too, or the robot reaches for something out of range
+        if object_full_scale:
             object_poses[:, -3:] = object_poses[:, -3:] * scale
         else:
             object_poses[:, -3:-1] = object_poses[:, -3:-1] * scale

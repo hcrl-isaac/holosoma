@@ -7,11 +7,18 @@ flexion) have an unambiguous angle in the source: the angle between the two segm
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 
-# SMPL body joint indices
-SMPL = {"L_Sho": 16, "L_Elb": 18, "L_Wri": 20, "R_Sho": 17, "R_Elb": 19, "R_Wri": 21,
-        "L_Hip": 1, "L_Kne": 4, "L_Ank": 7, "R_Hip": 2, "R_Kne": 5, "R_Ank": 8}
+# each T1 hinge's (proximal, hinge, distal) source joints under their SMPL and LAFAN/mocap names, and the
+# sign that maps the interior bend onto the joint's range (Elbow_Yaw is one-sided, negative on the left)
+T1_HINGES = {
+    "Left_Elbow_Yaw": ((("L_Shoulder", "LeftArm"), ("L_Elbow", "LeftForeArm"), ("L_Wrist", "LeftHand")), -1.0),
+    "Right_Elbow_Yaw": ((("R_Shoulder", "RightArm"), ("R_Elbow", "RightForeArm"), ("R_Wrist", "RightHand")), 1.0),
+    "Left_Knee_Pitch": ((("L_Hip", "LeftUpLeg"), ("L_Knee", "LeftLeg"), ("L_Ankle", "LeftFoot")), 1.0),
+    "Right_Knee_Pitch": ((("R_Hip", "RightUpLeg"), ("R_Knee", "RightLeg"), ("R_Ankle", "RightFoot")), 1.0),
+}
 
 
 def _bend(p: np.ndarray, a: int, b: int, c: int) -> np.ndarray:
@@ -32,25 +39,20 @@ def _bend(p: np.ndarray, a: int, b: int, c: int) -> np.ndarray:
     return np.arccos(np.clip(cos, -1.0, 1.0))
 
 
-def t1_joint_angle_targets(joints: np.ndarray) -> dict[str, np.ndarray]:
-    """Target angles for T1's flexion hinges, signed to match each joint's own range.
+def t1_joint_angle_targets(joints: np.ndarray, demo_joints: Sequence[str]) -> dict[str, np.ndarray]:
+    """Target angles for T1's flexion hinges whose three source joints ``demo_joints`` names.
 
     Args:
         joints: ``(T, J, 3)`` source joint positions, any consistent scale.
+        demo_joints: Name of each of the ``J`` source joints.
 
     Returns:
-        Mapping of T1 joint name to a ``(T,)`` target angle track.
+        Mapping of T1 joint name to a ``(T,)`` target angle track; a hinge the source lacks is absent.
     """
-    s = SMPL
-    l_elb = _bend(joints, s["L_Sho"], s["L_Elb"], s["L_Wri"])
-    r_elb = _bend(joints, s["R_Sho"], s["R_Elb"], s["R_Wri"])
-    l_kne = _bend(joints, s["L_Hip"], s["L_Kne"], s["L_Ank"])
-    r_kne = _bend(joints, s["R_Hip"], s["R_Kne"], s["R_Ank"])
-    # Elbow_Yaw is the flexion hinge and its range is one-sided: [-2.44, 0] left, [0, 2.44] right.
-    # Knee_Pitch flexes positive on both sides.
-    return {
-        "Left_Elbow_Yaw": -l_elb,
-        "Right_Elbow_Yaw": r_elb,
-        "Left_Knee_Pitch": l_kne,
-        "Right_Knee_Pitch": r_kne,
-    }
+    index = {name: i for i, name in enumerate(demo_joints)}
+    targets = {}
+    for t1_joint, (chain, sign) in T1_HINGES.items():
+        found = [next((index[n] for n in spellings if n in index), None) for spellings in chain]
+        if None not in found:
+            targets[t1_joint] = sign * _bend(joints, *found)
+    return targets
