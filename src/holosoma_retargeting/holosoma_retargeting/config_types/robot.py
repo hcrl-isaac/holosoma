@@ -170,9 +170,7 @@ class RobotConfig:
             return self.ankle_joints
 
         if self.robot_type == "g1":
-            return {
-                side: [f"{side}_ankle_pitch_joint", f"{side}_ankle_roll_joint"] for side in ("left", "right")
-            }
+            return {side: [f"{side}_ankle_pitch_joint", f"{side}_ankle_roll_joint"] for side in ("left", "right")}
         if self.robot_type == "t1":
             return {
                 side: [f"{side.capitalize()}_Ankle_Pitch", f"{side.capitalize()}_Ankle_Roll"]
@@ -263,6 +261,9 @@ class RobotConfig:
                     "35": 0.05,
                 }
             )
+        elif self.robot_type == "t1":
+            # match the deployed t1.urdf knee flexion limit, tighter than the bundled model's 2.34
+            base.update({"21": 2.18, "27": 2.18})  # left, right knee pitch
 
         return base
 

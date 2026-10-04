@@ -1,8 +1,8 @@
-"""Solver term weights and switches (the hcrl additions to the interaction-mesh retargeter)."""
+"""Weights and switches for the interaction-mesh retargeter's objective terms."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from typing import Literal
 
 
@@ -25,6 +25,8 @@ class SolverTerms:
     """Never command a toe target below the sole on flat ground."""
     foot_min_sep: float = 0.0
     """Widen foot targets laterally to at least this toe separation (m, 0 = off)."""
+    object_full_scale: bool = False
+    """Scale the object's whole position with the human; off keeps its absolute height (object tasks)."""
 
     # --- tracking terms ---
     laplacian_weight: float | None = None
@@ -45,8 +47,6 @@ class SolverTerms:
     """Match the sole plane orientation to the source."""
     sole_height_weight: float = 2000.0
     """Pull a planted sole down onto the floor (one-sided)."""
-    root_rate_weight: float = 0.0
-    """Match the source root angular rate."""
 
     # --- posture priors ---
     swing_ankle_weight: float = 0.5
@@ -121,26 +121,19 @@ class SolverTerms:
     """Path to save the solver's per-frame targets to."""
 
 
-def resolve_terms(cli: SolverTerms, preset: str | None) -> SolverTerms:
-    """Preset values, with any field the CLI set away from its default winning.
+def preset_terms(preset: str | None) -> SolverTerms:
+    """The terms a named preset sets over the plain defaults.
 
     Args:
-        cli: Terms as parsed from the command line.
-        preset: Preset name in ``config_values.presets.PRESETS``, or None.
+        preset: Preset name in ``config_values.presets.PRESETS``, or None for the plain defaults.
 
     Returns:
-        The effective terms.
+        The preset's terms.
     """
     if preset is None:
-        return cli
+        return SolverTerms()
     from holosoma_retargeting.config_values.presets import PRESETS
 
     if preset not in PRESETS:
         raise ValueError(f"Unknown preset {preset!r}; available: {sorted(PRESETS)}")
-    defaults = SolverTerms()
-    merged = dict(PRESETS[preset])
-    for f in fields(SolverTerms):
-        v = getattr(cli, f.name)
-        if v != getattr(defaults, f.name):
-            merged[f.name] = v
-    return SolverTerms(**merged)
+    return SolverTerms(**PRESETS[preset])

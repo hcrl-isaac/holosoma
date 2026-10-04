@@ -174,9 +174,8 @@ SMPLX_DEMO_JOINTS = [
 ]
 
 
-# hcrl g1fk format: G1 FK world link positions used as a robot-sized pseudo-source (identity mapping).
-# Source csvs are already-retargeted G1 motions (BONES-SEED); the constrained solve re-projects them
-# onto reconstructed terrain with hard contact/penetration/velocity constraints.
+# G1 FK world link positions as a robot-sized pseudo-source (identity mapping), so already-retargeted G1
+# motions can be re-projected onto reconstructed terrain under contact and penetration constraints.
 G1FK_DEMO_JOINTS = [
     "pelvis_contour_link",
     "left_hip_pitch_link",
@@ -248,9 +247,8 @@ JOINTS_MAPPINGS = {
         "L_Wrist": "left_rubber_hand_link",
         "R_Wrist": "right_rubber_hand_link",
     },
-    # T1 arm chain: AL3 carries the upper-arm twist (Elbow_Pitch); the flexion hinge (Elbow_Yaw) sits at
-    # the *_hand_link origin, and the palm is the *_hand_sphere_link 0.2 m beyond it. The Trunk origin is
-    # 0.116 m above the hips where the SMPL pelvis is 0.06, so the pelvis maps to a body at that height.
+    # T1 elbow flexion hinges at *_hand_link (palm = *_hand_sphere_link). The Trunk origin sits 0.116 m
+    # above the hips against the SMPL pelvis's 0.06, so the pelvis maps to pelvis_kp at that height.
     ("smplh", "t1"): {
         "L_Elbow": "left_hand_link",
         "R_Elbow": "right_hand_link",
@@ -329,27 +327,26 @@ JOINTS_MAPPINGS = {
         "RightLeg": "Shank_Right",
         "RightToeBase": "right_foot_sphere_5_link",
         "LeftArm": "AL1",
+        "LeftForeArm": "left_hand_link",
         "LeftHandMiddle3": "left_hand_sphere_link",
         "RightArm": "AR1",
+        "RightForeArm": "right_hand_link",
         "RightHandMiddle3": "right_hand_sphere_link",
         "LeftFoot": "Ankle_Cross_Left",
         "RightFoot": "Ankle_Cross_Right",
     },
 }
 
-# Data format specific constants
-# Source keypoint used as the pelvis/root reference (q_init + eval); "Spine1" is the mocap/lafan name.
-ROOT_KEYPOINT_BY_FORMAT = {
-    "lafan": "Spine1",
-    "smplh": "Pelvis",
-    "mocap": "Spine1",
-    "smplx": "Pelvis",
-    "g1fk": "pelvis_contour_link",
-}
-
 
 def root_keypoint(demo_joints: list) -> str:
-    """The root/pelvis keypoint present in this joint list (format-agnostic lookup)."""
+    """Find the root/pelvis keypoint in a joint list.
+
+    Args:
+        demo_joints: Source keypoint names of one data format.
+
+    Returns:
+        The first of ``Spine1``, ``Pelvis`` or ``pelvis_contour_link`` present in the list.
+    """
     for name in ("Spine1", "Pelvis", "pelvis_contour_link"):
         if name in demo_joints:
             return name
@@ -379,7 +376,7 @@ DATA_FORMAT_CONSTANTS: dict[str, FormatConstants] = {
         "default_human_height": 1.78,
     },
     "g1fk": {
-        "default_human_height": 1.32,  # = G1 robot height -> smpl_scale 1 (source is robot-sized)
+        "default_human_height": 1.32,  # the G1's height, so smpl_scale is 1 for a robot-sized source
     },
 }
 

@@ -1,9 +1,11 @@
 """Convert holosoma retargeting output (qpos npz, 30 fps) back to BONES-SEED csv layout (120 fps).
 
-qpos rows are mujoco freejoint (xyz + wxyz quat) + 29 hinge joints in MODEL order; the csv wants
+qpos rows are mujoco freejoint (xyz + wxyz quat) + 29 hinge joints in model order, and the csv wants
 (px py pz qx qy qz qw + joints in the csv column order) at the source rate. Root position and joints
 are cubic-interpolated, the quaternion slerped, from 30 fps back up to 120 fps.
 """
+
+from __future__ import annotations
 
 import argparse
 from pathlib import Path
@@ -18,7 +20,17 @@ from holosoma_retargeting.hcrl.csv_to_g1fk import DEFAULT_MODEL
 
 
 def qpos_to_csv(qpos: np.ndarray, model: mujoco.MjModel, columns: list[str], up: int) -> pd.DataFrame:
-    """Upsample (T,36) qpos by ``up`` and reorder into the csv column layout."""
+    """Upsample a qpos clip and reorder it into the csv column layout.
+
+    Args:
+        qpos: G1 retarget output, shape (T, 36), quaternion in wxyz.
+        model: Mujoco model whose hinge order ``qpos`` follows.
+        columns: Csv column names (7 root columns, then joints).
+        up: Upsampling factor.
+
+    Returns:
+        Table of ``(T - 1) * up + 1`` rows in ``columns`` order, quaternion in xyzw.
+    """
     t = np.arange(len(qpos))
     t_hi = np.linspace(0, len(qpos) - 1, (len(qpos) - 1) * up + 1)
 
@@ -49,10 +61,10 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for f in args.qpos_npz:
         d = np.load(f, allow_pickle=True)
-        df = qpos_to_csv(np.asarray(d["qpos"]), model, columns, args.upsample)
+        table = qpos_to_csv(np.asarray(d["qpos"]), model, columns, args.upsample)
         stem = Path(f).stem.replace("_original", "")
-        df.to_csv(out_dir / f"{stem}.csv", index=False)
-        print(f"[qpos2csv] {stem}: {d['qpos'].shape} -> {len(df)} rows")
+        table.to_csv(out_dir / f"{stem}.csv", index=False)
+        print(f"[qpos2csv] {stem}: {d['qpos'].shape} -> {len(table)} rows")
 
 
 if __name__ == "__main__":

@@ -19,10 +19,19 @@ DEFAULT_MODEL = PKG_ROOT / "models" / "g1" / "g1_29dof_spherehand.xml"
 
 
 def qpos_row(model: mujoco.MjModel, csv_path: Path, row_idx: int = 0) -> np.ndarray:
-    """One csv row as a mujoco qpos vector (freejoint xyz + wxyz, then joints in model order)."""
-    df = pd.read_csv(csv_path, nrows=row_idx + 1)
-    row = df.to_numpy(dtype=np.float64)[row_idx]
-    joint_cols = list(df.columns[7:])
+    """Read one csv row as a mujoco qpos vector.
+
+    Args:
+        model: G1 mujoco model.
+        csv_path: BONES-SEED-layout clip csv.
+        row_idx: Row to read.
+
+    Returns:
+        The qpos (freejoint xyz + wxyz, then joints in model order), shape (nq,).
+    """
+    table = pd.read_csv(csv_path, nrows=row_idx + 1)
+    row = table.to_numpy(dtype=np.float64)[row_idx]
+    joint_cols = list(table.columns[7:])
     q = np.zeros(model.nq)
     q[:3] = row[:3]
     q[3:7] = (row[6], row[3], row[4], row[5])  # xyzw -> wxyz
@@ -35,9 +44,17 @@ def qpos_row(model: mujoco.MjModel, csv_path: Path, row_idx: int = 0) -> np.ndar
 
 
 def fk_positions(model: mujoco.MjModel, csv_path: Path) -> np.ndarray:
-    """FK a csv clip into (T, len(G1FK_DEMO_JOINTS), 3) world link positions."""
-    df = pd.read_csv(csv_path)
-    joint_cols = list(df.columns[7:])
+    """FK a csv clip into world link positions.
+
+    Args:
+        model: G1 mujoco model containing every csv joint.
+        csv_path: BONES-SEED-layout clip csv.
+
+    Returns:
+        Positions of the ``G1FK_DEMO_JOINTS`` links, shape (T, 15, 3).
+    """
+    table = pd.read_csv(csv_path)
+    joint_cols = list(table.columns[7:])
     # qpos layout: freejoint (xyz + wxyz) then hinge joints in model order
     hinge_addr = {}
     for j in range(model.njnt):
@@ -50,7 +67,7 @@ def fk_positions(model: mujoco.MjModel, csv_path: Path) -> np.ndarray:
     body_ids = [model.body(n).id for n in G1FK_DEMO_JOINTS]
 
     data = mujoco.MjData(model)
-    vals = df.to_numpy(dtype=np.float64)
+    vals = table.to_numpy(dtype=np.float64)
     out = np.zeros((len(vals), len(body_ids), 3), dtype=np.float32)
     for t, row in enumerate(vals):
         data.qpos[:3] = row[:3]

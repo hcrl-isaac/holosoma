@@ -120,6 +120,17 @@ class RobotConfig:
     default_per_joint_action_scale: tuple[float, ...] | None = None
     """Fallback per-joint action scales used when ONNX metadata is missing."""
 
+    interp_gain_scale: float = 1.0
+    """Gain multiplier applied to motor_kp/motor_kd during the INTERPOLATION
+    (goto-start) phase only, i.e. while ramping to the policy's start pose.
+
+    >1.0 stiffens the hold during the ramp (a firmer move to the start pose)
+    while the policy phase keeps its own (ONNX/config) gains unchanged. 1.0
+    (default) preserves current behaviour exactly. Applied on top of the policy
+    gains, and composes with the runtime ``kp_level`` operator knob.
+    See ``BasePolicy.policy_action`` (get_ready branch).
+    """
+
     # =========================================================================
     # WBT Stiff Startup Configuration (OPTIONAL - for WBT policies)
     # =========================================================================

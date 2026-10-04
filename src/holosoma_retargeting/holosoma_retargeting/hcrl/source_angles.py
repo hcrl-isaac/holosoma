@@ -7,46 +7,17 @@ flexion) have an unambiguous angle in the source: the angle between the two segm
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 
-from holosoma_retargeting.config_types.data_type import LAFAN_DEMO_JOINTS, SMPLH_DEMO_JOINTS, SMPLX_DEMO_JOINTS
-
-_SMPL_NAMES = (
-    ("L_Sho", "L_Shoulder"),
-    ("L_Elb", "L_Elbow"),
-    ("L_Wri", "L_Wrist"),
-    ("R_Sho", "R_Shoulder"),
-    ("R_Elb", "R_Elbow"),
-    ("R_Wri", "R_Wrist"),
-    ("L_Hip", "L_Hip"),
-    ("L_Kne", "L_Knee"),
-    ("L_Ank", "L_Ankle"),
-    ("R_Hip", "R_Hip"),
-    ("R_Kne", "R_Knee"),
-    ("R_Ank", "R_Ankle"),
-)
-_LAFAN_NAMES = (
-    ("L_Sho", "LeftArm"),
-    ("L_Elb", "LeftForeArm"),
-    ("L_Wri", "LeftHand"),
-    ("R_Sho", "RightArm"),
-    ("R_Elb", "RightForeArm"),
-    ("R_Wri", "RightHand"),
-    ("L_Hip", "LeftUpLeg"),
-    ("L_Kne", "LeftLeg"),
-    ("L_Ank", "LeftFoot"),
-    ("R_Hip", "RightUpLeg"),
-    ("R_Kne", "RightLeg"),
-    ("R_Ank", "RightFoot"),
-)
-# each format's keypoint indices by joint name: smplh (InterMimic) and smplx order their joints differently
-SKELETONS = {
-    fmt: {key: joints.index(name) for key, name in names}
-    for fmt, joints, names in (
-        ("smplh", SMPLH_DEMO_JOINTS, _SMPL_NAMES),
-        ("smplx", SMPLX_DEMO_JOINTS, _SMPL_NAMES),
-        ("lafan", LAFAN_DEMO_JOINTS, _LAFAN_NAMES),
-    )
+# each T1 hinge's (proximal, hinge, distal) source joints under their SMPL and LAFAN/mocap names, and the
+# sign that maps the interior bend onto the joint's range (Elbow_Yaw is one-sided, negative on the left)
+T1_HINGES = {
+    "Left_Elbow_Yaw": ((("L_Shoulder", "LeftArm"), ("L_Elbow", "LeftForeArm"), ("L_Wrist", "LeftHand")), -1.0),
+    "Right_Elbow_Yaw": ((("R_Shoulder", "RightArm"), ("R_Elbow", "RightForeArm"), ("R_Wrist", "RightHand")), 1.0),
+    "Left_Knee_Pitch": ((("L_Hip", "LeftUpLeg"), ("L_Knee", "LeftLeg"), ("L_Ankle", "LeftFoot")), 1.0),
+    "Right_Knee_Pitch": ((("R_Hip", "RightUpLeg"), ("R_Knee", "RightLeg"), ("R_Ankle", "RightFoot")), 1.0),
 }
 
 
@@ -68,28 +39,20 @@ def _bend(p: np.ndarray, a: int, b: int, c: int) -> np.ndarray:
     return np.arccos(np.clip(cos, -1.0, 1.0))
 
 
-def t1_joint_angle_targets(joints: np.ndarray, data_format: str = "smplx") -> dict[str, np.ndarray]:
-    """Target angles for T1's flexion hinges, signed to match each joint's own range.
+def t1_joint_angle_targets(joints: np.ndarray, demo_joints: Sequence[str]) -> dict[str, np.ndarray]:
+    """Target angles for T1's flexion hinges whose three source joints ``demo_joints`` names.
 
     Args:
         joints: ``(T, J, 3)`` source joint positions, any consistent scale.
-        data_format: Source skeleton, one of ``SKELETONS``.
+        demo_joints: Name of each of the ``J`` source joints.
 
     Returns:
-        Mapping of T1 joint name to a ``(T,)`` target angle track.
+        Mapping of T1 joint name to a ``(T,)`` target angle track; a hinge the source lacks is absent.
     """
-    if data_format not in SKELETONS:
-        raise ValueError(f"no joint-angle map for data format {data_format!r}; known: {sorted(SKELETONS)}")
-    s = SKELETONS[data_format]
-    l_elb = _bend(joints, s["L_Sho"], s["L_Elb"], s["L_Wri"])
-    r_elb = _bend(joints, s["R_Sho"], s["R_Elb"], s["R_Wri"])
-    l_kne = _bend(joints, s["L_Hip"], s["L_Kne"], s["L_Ank"])
-    r_kne = _bend(joints, s["R_Hip"], s["R_Kne"], s["R_Ank"])
-    # Elbow_Yaw is the flexion hinge and its range is one-sided: [-2.44, 0] left, [0, 2.44] right.
-    # Knee_Pitch flexes positive on both sides.
-    return {
-        "Left_Elbow_Yaw": -l_elb,
-        "Right_Elbow_Yaw": r_elb,
-        "Left_Knee_Pitch": l_kne,
-        "Right_Knee_Pitch": r_kne,
-    }
+    index = {name: i for i, name in enumerate(demo_joints)}
+    targets = {}
+    for t1_joint, (chain, sign) in T1_HINGES.items():
+        found = [next((index[n] for n in spellings if n in index), -1) for spellings in chain]
+        if min(found) >= 0:
+            targets[t1_joint] = sign * _bend(joints, *found)
+    return targets

@@ -69,7 +69,7 @@ class RetargetingConfig:
     """Objective weights and switches (nested, e.g. --terms.keypoint-weight 50)."""
 
     preset: str | None = None
-    """Named set of terms (config_values/presets.py); explicit --terms.* values win over it."""
+    """Named set of terms (config_values/presets.py) that parse_config uses as the ``--terms.*`` defaults."""
 
 
 @dataclass

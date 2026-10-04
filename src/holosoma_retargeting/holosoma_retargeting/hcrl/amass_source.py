@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Iterator
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
 import joblib
@@ -29,26 +30,32 @@ from holosoma_retargeting.hcrl.smpl_fk import (
     to_z_up,
 )
 
-# SMPL takes 24 joints x 3; AMASS "SMPL+H G" stores 52 (root + 21 body + 30 hand) and OMOMO's SMPL-X 55.
+# SMPL takes 24 joints x 3, AMASS "SMPL+H G" stores 52 (root + 21 body + 30 hand) and OMOMO's SMPL-X 55.
 # The leading 22 joints are shared, and the two SMPL hand joints are left at rest.
 SMPL_POSE_DIM = 24 * 3
 SHARED_POSE_DIM = 22 * 3
 
-# AMASS ships only gendered fits ("SMPL+H G") for the full corpus, so FK-ing every clip through one body
-# would mis-proportion half of them -- and the sole heights this adapter derives are what pins the feet to
-# the floor. Each clip is FK'd on the model its fit used, named by the npz's own `gender` field.
+# AMASS fits are gendered and one body would mis-proportion the sole heights that pin the feet, so each
+# clip is FK'd on the model named by its npz's own `gender` field.
 SMPL_MODEL_FILES = {"male": "SMPL_MALE.pkl", "female": "SMPL_FEMALE.pkl", "neutral": "SMPL_NEUTRAL.pkl"}
 
-# AMASS is not uniform across sub-datasets: the SMPL-X releases spell the frame rate differently and some
-# store the pose split by body part instead of one array. Both differences are silent if unhandled -- a
-# missed frame rate plays a 120 fps clip as 30, and the retarget comes out in slow motion.
+# AMASS sub-datasets spell the frame rate differently and some split the pose by body part. A missed
+# frame rate would silently play a 120 fps clip as 30.
 FRAME_RATE_KEYS = ("mocap_framerate", "mocap_frame_rate", "frame_rate", "fps")
 SPLIT_POSE_KEYS = ("root_orient", "pose_body")
 
 
 def _resample(values: np.ndarray, source_fps: float, target_fps: float) -> np.ndarray:
-    """Nearest-frame resample along axis 0. Nearest, not interpolated: SMPL poses are axis-angle, and
-    interpolating them componentwise is wrong near the +/-pi wrap."""
+    """Nearest-frame resample along axis 0, since axis-angle poses cannot be interpolated componentwise.
+
+    Args:
+        values: Per-frame values, shape ``(T, ...)``.
+        source_fps: Rate of ``values``.
+        target_fps: Rate to resample to.
+
+    Returns:
+        The resampled values.
+    """
     if abs(source_fps - target_fps) < 1e-6:
         return values
     count = max(1, round(values.shape[0] * target_fps / source_fps))
@@ -57,7 +64,14 @@ def _resample(values: np.ndarray, source_fps: float, target_fps: float) -> np.nd
 
 
 def _gender(raw: dict) -> str:
-    """The clip's fitted gender, normalized. Stored as bytes, a 0-d array, or a plain string."""
+    """Read the clip's fitted gender, stored as bytes, a 0-d array or a plain string.
+
+    Args:
+        raw: One clip's npz contents.
+
+    Returns:
+        ``male``, ``female`` or ``neutral`` (also the fallback for an unknown value).
+    """
     value = raw.get("gender", "neutral")
     value = value.item() if isinstance(value, np.ndarray) else value
     value = value.decode() if isinstance(value, bytes) else str(value)
@@ -66,7 +80,14 @@ def _gender(raw: dict) -> str:
 
 
 def load_models(model_dir: Path) -> dict[str, dict]:
-    """Load the male/female/neutral SMPL models a gendered corpus needs, keyed by gender."""
+    """Load the male/female/neutral SMPL models a gendered corpus needs.
+
+    Args:
+        model_dir: Directory holding the ``SMPL_<GENDER>.pkl`` files; the neutral one is required.
+
+    Returns:
+        The models present, keyed by gender.
+    """
     models = {}
     for gender, filename in SMPL_MODEL_FILES.items():
         path = model_dir / filename
@@ -78,7 +99,14 @@ def load_models(model_dir: Path) -> dict[str, dict]:
 
 
 def _source_poses(raw: dict) -> np.ndarray:
-    """The root+body pose block, from either a single ``poses`` array or split per-part fields."""
+    """Read the root+body pose block from either a single ``poses`` array or split per-part fields.
+
+    Args:
+        raw: One clip's npz contents.
+
+    Returns:
+        Per-frame pose parameters, shape ``(T, D)``.
+    """
     if "poses" in raw:
         return np.asarray(raw["poses"], dtype=np.float64)
     if all(key in raw for key in SPLIT_POSE_KEYS):
@@ -88,7 +116,14 @@ def _source_poses(raw: dict) -> np.ndarray:
 
 
 def _frame_rate(raw: dict) -> float:
-    """The clip's source frame rate. Raises rather than guessing: a wrong rate is silent slow motion."""
+    """Read the clip's source frame rate, raising rather than guessing.
+
+    Args:
+        raw: One clip's npz contents.
+
+    Returns:
+        Frames per second.
+    """
     for key in FRAME_RATE_KEYS:
         if key in raw:
             return float(np.asarray(raw[key]).item())
@@ -96,7 +131,14 @@ def _frame_rate(raw: dict) -> float:
 
 
 def _body_pose(poses: np.ndarray) -> np.ndarray:
-    """Take the shared root+body block of an SMPL-H/-X pose array into SMPL's 24-joint layout."""
+    """Take the shared root+body block of an SMPL-H/-X pose array into SMPL's 24-joint layout.
+
+    Args:
+        poses: SMPL-H/-X pose parameters, shape ``(T, >=66)``.
+
+    Returns:
+        SMPL pose parameters with the hand joints at rest, shape ``(T, 72)``.
+    """
     if poses.shape[-1] < SHARED_POSE_DIM:
         raise ValueError(f"pose array has {poses.shape[-1]} values per frame, expected at least {SHARED_POSE_DIM}")
     out = np.zeros((poses.shape[0], SMPL_POSE_DIM), dtype=np.float64)
@@ -104,18 +146,15 @@ def _body_pose(poses: np.ndarray) -> np.ndarray:
     return out
 
 
-# Signed volume of three anatomically independent body axes. Its SIGN is a handedness invariant: a
-# frame conversion that mirrors the source flips it, silently swapping left and right limbs while every
-# position and height check still passes. MEASURED, not assumed: 300/300 of the validated Soccer-X
-# sources give a positive value (median 0.0082).
+# Chirality sign of a correctly handed source. A mirroring frame conversion flips it, swapping left and
+# right limbs while every position and height check still passes.
 CHIRALITY_REFERENCE_SIGN = 1.0
 
 
 def up_axis(joints: np.ndarray) -> int:
     """Axis the body stands along in this clip, from the mean head-minus-feet vector.
 
-    This measures POSTURE, not the source frame: a lying or crawling clip reads horizontal. Use it only
-    through :func:`corpus_up_axis`, which takes the majority over many clips.
+    It reads posture, not the source frame, so use it through :func:`corpus_up_axis`'s vote over clips.
 
     Args:
         joints: SMPL body joint positions, shape ``(frames, >=16, 3)``.
@@ -130,9 +169,7 @@ def up_axis(joints: np.ndarray) -> int:
 def corpus_up_axis(models: dict, samples: list, min_agreement: float = 0.7) -> tuple[int, float]:
     """The source frame's up-axis, by majority vote over sampled clips.
 
-    Decided ONCE per corpus and applied uniformly. A per-clip rule follows posture instead of the frame,
-    so it rotates every lying/crawling clip into nonsense -- and neither the handedness check nor the
-    height check catches that, because a rotation preserves both.
+    Apply the result to the whole corpus: a per-clip rule follows posture and rotates lying clips.
 
     Args:
         models: Gender-keyed SMPL models.
@@ -160,16 +197,13 @@ def corpus_up_axis(models: dict, samples: list, min_agreement: float = 0.7) -> t
 def chirality(joints: np.ndarray) -> float:
     """Median signed volume of (hip axis, foot-forward axis, spine axis) over the clip.
 
-    The three axes must be anatomically independent -- deriving one as a cross product of the other two
-    makes the determinant unconditionally positive and the test vacuous.
-
     Args:
         joints: SMPL body joint positions, shape ``(frames, >=16, 3)``.
 
     Returns:
-        The median determinant. Compare its SIGN with :data:`CHIRALITY_REFERENCE_SIGN`; the magnitude is
-        just body scale.
+        The median determinant, whose sign against :data:`CHIRALITY_REFERENCE_SIGN` flags a mirrored clip.
     """
+    # independent axes: one derived as a cross product would make the determinant always positive
     across = joints[:, 2] - joints[:, 1]  # left hip -> right hip
     up = joints[:, 15] - joints[:, 0]  # pelvis -> head
     forward = joints[:, [10, 11]].mean(axis=1) - joints[:, [7, 8]].mean(axis=1)  # ankles -> toes
@@ -213,7 +247,7 @@ def convert_clip(
     sole_normal = np.stack([plane_normals(p) for p in sole_points], axis=1)
     sole_height = np.stack([p[..., 2].min(axis=1) for p in sole_points], axis=1)
 
-    # Put the feet on z=0 so the retargeter's contact logic sees a floor; AMASS clips float arbitrarily.
+    # AMASS clips float arbitrarily, so put the feet on z=0 for the retargeter's contact logic.
     ground = float(np.median(np.min(joints[:, [10, 11], 2], axis=1)))
     joints[..., 2] -= ground
     sole_height -= float(np.median(np.min(sole_height, axis=1)))
@@ -240,22 +274,44 @@ def convert_clip(
     return meta
 
 
-def iter_clips(root: Path) -> Iterator[tuple[str, dict]]:
-    """Yield ``(name, raw)`` for every sequence under ``root``.
+def _load_npz(path: Path) -> dict:
+    """Read one AMASS sequence into a plain dict and close its file.
 
-    Handles both corpus shapes: an AMASS tree of per-sequence ``.npz`` (the dataset/subject/sequence
-    path becomes the name), or an OMOMO ``.p`` joblib dict of sequences keyed by index.
+    Args:
+        path: The sequence's ``.npz``.
+
+    Returns:
+        The sequence's arrays, keyed by field.
+    """
+    with np.load(path, allow_pickle=True) as raw:
+        return dict(raw)
+
+
+def iter_clips(root: Path) -> list[tuple[str, Callable[[], dict]]]:
+    """List every sequence under ``root`` with a loader that reads it on demand.
+
+    Args:
+        root: An AMASS tree of per-sequence ``.npz`` (named by their dataset/subject/sequence path), or an
+            OMOMO ``.p`` joblib file of sequences.
+
+    Returns:
+        ``(name, load)`` pairs, where ``load()`` returns that sequence's dict.
     """
     if root.is_file():
-        for seq in joblib.load(root).values():
-            yield str(seq["seq_name"]), seq
-        return
-    for path in sorted(p for p in root.rglob("*.npz") if not p.name.startswith("shape")):
-        yield "_".join(path.relative_to(root).with_suffix("").parts), np.load(path, allow_pickle=True)
+        return [(str(seq["seq_name"]), partial(dict, seq)) for seq in joblib.load(root).values()]
+    paths = sorted(p for p in root.rglob("*.npz") if not p.name.startswith("shape"))
+    return [("_".join(p.relative_to(root).with_suffix("").parts), partial(_load_npz, p)) for p in paths]
 
 
 def _vote_sample(raw: dict) -> tuple | None:
-    """A ``(gender, poses, trans)`` triple for the up-axis vote, or None if the clip is unreadable."""
+    """Draw an up-axis vote sample from the clip's first 200 frames.
+
+    Args:
+        raw: One clip's npz contents.
+
+    Returns:
+        A ``(gender, poses, trans)`` triple, or None if the clip is unreadable.
+    """
     try:
         return (
             _gender(raw),
@@ -302,26 +358,29 @@ def main() -> None:
     models = load_models(args.smpl_model_dir)
     soles = {gender: sole_vertices(model) for gender, model in models.items()}
     print(f"[amass] body models: {sorted(models)}")
-    clips = list(iter_clips(args.clip_root))
+    clips = iter_clips(args.clip_root)
     print(f"[amass] {len(clips)} clips found")
 
     if args.up_axis == "auto":
         stride = max(1, len(clips) // 64)
-        samples = [t for _, raw in clips[::stride][:64] if (t := _vote_sample(raw)) is not None]
+        samples = [t for _, load in clips[::stride][:64] if (t := _vote_sample(load())) is not None]
         axis, agreement = corpus_up_axis(models, samples)
         print(f"[amass] corpus up-axis: {'xyz'[axis]} ({agreement:.0%} of {len(samples)} sampled clips)")
     else:
         axis, agreement = ("xyz".index(args.up_axis), 1.0)
         print(f"[amass] corpus up-axis: {args.up_axis} (forced)")
-    rotate = axis != 2
+    if axis == 0:
+        raise ValueError("the corpus votes x-up, which no conversion here handles; pass --up-axis y or z")
+    rotate = axis == 1
 
-    written, skipped, rates = [], 0, {}
-    for name, raw in clips:
+    written, skipped = [], 0
+    rates: dict[float, int] = {}
+    for name, load in clips:
         try:
             meta = convert_clip(
                 models,
                 soles,
-                raw,
+                load(),
                 args.out_dir,
                 args.fps,
                 name,

@@ -1,7 +1,7 @@
 """Attach OMOMO object poses to the already-converted source clips.
 
-The source conversion kept only the human joints, so object-aware retargeting had nothing to hold onto.
-The object pose must land in the SAME frame as those joints: for OMOMO that conversion applied no
+The source conversion keeps only the human joints, so object-aware retargeting needs the object track
+added. The object pose must land in the same frame as those joints: for OMOMO that conversion applies no
 rotation and only a ground shift in z, so the object translation gets the identical shift.
 """
 
@@ -13,6 +13,11 @@ import pathlib
 
 import joblib
 import numpy as np
+
+from holosoma_retargeting.hcrl.amass_source import _resample
+
+# per-frame arrays of a converted clip, all cut to the object track's length
+PER_FRAME_KEYS = ("global_joint_positions", "sole_normal", "sole_height")
 
 
 def rotmat_to_quat(r: np.ndarray) -> np.ndarray:
@@ -47,21 +52,6 @@ def rotmat_to_quat(r: np.ndarray) -> np.ndarray:
     return q / np.linalg.norm(q, axis=1, keepdims=True)
 
 
-def aa_to_quat(v: np.ndarray) -> np.ndarray:
-    """Axis-angle to ``(w, x, y, z)`` quaternions.
-
-    Args:
-        v: ``(T, 3)`` axis-angle rotations.
-
-    Returns:
-        ``(T, 4)`` unit quaternions, w first.
-    """
-    th = np.linalg.norm(v, axis=1, keepdims=True)
-    axis = np.divide(v, th, out=np.zeros_like(v), where=th > 1e-9)
-    half = th / 2.0
-    return np.concatenate([np.cos(half), axis * np.sin(half)], axis=1)
-
-
 def main() -> None:
     """Write per-clip npz carrying the human joints plus the object pose track."""
     ap = argparse.ArgumentParser()
@@ -81,15 +71,21 @@ def main() -> None:
             if not src.exists() or not meta_p.exists():
                 n_miss += 1
                 continue
-            d = dict(np.load(src, allow_pickle=True))
-            ground = float(json.loads(meta_p.read_text())["ground"])
+            meta = json.loads(meta_p.read_text())
+            if meta["rotated_to_z_up"]:
+                raise ValueError(f"{name}: the joints were rotated to z-up, which this object track does not get")
+            with np.load(src, allow_pickle=True) as raw:
+                d = dict(raw)
             trans = np.asarray(seq["obj_trans"]).reshape(len(seq["obj_trans"]), 3).astype(np.float64)
-            trans[:, 2] -= ground  # same shift the joints got
+            trans[:, 2] -= float(meta["ground"])  # same shift the joints got
             quat = rotmat_to_quat(np.asarray(seq["obj_rot"]).astype(np.float64))
-            n = min(len(trans), len(d["global_joint_positions"]))
-            d["object_poses"] = np.concatenate([quat[:n], trans[:n]], axis=1).astype(np.float32)
-            # the source root orientation, which the joints-only conversion had dropped
-            d["root_quat"] = aa_to_quat(np.asarray(seq["root_orient"]).astype(np.float64))[:n].astype(np.float32)
+            # the same nearest-frame resample the joints got, so frame i of both is the same instant
+            poses = _resample(np.concatenate([quat, trans], axis=1), float(meta["source_fps"]), float(meta["fps"]))
+            n = min(len(poses), len(d["global_joint_positions"]))
+            for key in PER_FRAME_KEYS:
+                if key in d:
+                    d[key] = d[key][:n]
+            d["object_poses"] = poses[:n].astype(np.float32)
             obj = name.split("_")[1]
             d["object_name"] = np.array(obj)
             d["object_scale"] = np.array(float(np.median(seq["obj_scale"])))

@@ -14,6 +14,7 @@ from holosoma.managers.reward import RewardManager
 from holosoma.managers.termination import TerminationManager
 from holosoma.managers.terrain import TerrainManager
 from holosoma.simulator.base_simulator.base_simulator import BaseSimulator
+from holosoma.simulator.base_simulator.hooks import Phase
 from holosoma.simulator.shared.object_registry import ObjectType
 from holosoma.utils.helpers import get_class
 from holosoma.utils.safe_torch_import import torch
@@ -90,6 +91,8 @@ class BaseTask:
             simulator=simulator_config.config,
             robot=robot_config,
             scene=tyro_config.scene,
+            sensors=tyro_config.sensors,
+            plugin=tyro_config.plugin,  # egress/custom plugins; the simulator installs them in __init__
             training=training_config,
             logger=tyro_config.logger,
             experiment_dir=str(experiment_dir),
@@ -118,7 +121,7 @@ class BaseTask:
         self.simulator.setup()
         self.sim_dt = self.simulator.sim_dt
 
-        self.dt = simulator_config.config.sim.control_decimation * self.sim_dt
+        self.dt = simulator_config.config.sim.control_decimation_steps * self.sim_dt
         self.max_episode_length_s = simulator_config.config.sim.max_episode_length_s
         self.max_episode_length = np.ceil(self.max_episode_length_s / self.dt)
 
@@ -243,8 +246,7 @@ class BaseTask:
 
         # Call episode end for environments that are being reset
         for env_id in env_ids:
-            if hasattr(self.simulator, "on_episode_end"):
-                self.simulator.on_episode_end(env_id.item())
+            self.simulator.hooks.emit(Phase.EPISODE_END, env_id.item())
 
         # Reset observation history BEFORE state changes (must happen first to clear history buffers)
         self.observation_manager.reset(env_ids)
@@ -279,8 +281,7 @@ class BaseTask:
 
         # Call episode start for environments that have been reset
         for env_id in env_ids:
-            if hasattr(self.simulator, "on_episode_start"):
-                self.simulator.on_episode_start(env_id.item())
+            self.simulator.hooks.emit(Phase.EPISODE_START, env_id.item())
 
     def _reset_envs_idx_impl(self, env_ids, target_states=None, target_buf=None):
         """Template implementation of environment reset.
@@ -450,10 +451,13 @@ class BaseTask:
             self.action_manager.process_actions(actions)
 
     def _physics_step(self):
+        self.simulator.hooks.emit(Phase.FRAME_BEGIN)
         self.render()
-        for _ in range(self.simulator.simulator_config.sim.control_decimation):
+        for _ in range(self.simulator.simulator_config.sim.control_decimation_steps):
             self._apply_force_in_physics_step()
+            self.simulator.hooks.emit(Phase.PRE_STEP)
             self.simulator.simulate_at_each_physics_step()
+            self.simulator.hooks.emit(Phase.POST_STEP)
 
     def _apply_force_in_physics_step(self):
         if self.action_manager is not None:
@@ -461,6 +465,9 @@ class BaseTask:
 
     def _post_physics_step(self):
         self._refresh_sim_tensors()
+        # Cameras render and egress consumers publish here, as FRAME_END plugins (the cameras'
+        # render_sensors is registered before any consumer, so buffers are fresh on read).
+        self.simulator.hooks.emit(Phase.FRAME_END)
         self.episode_length_buf += 1
         self._update_counters_each_step()
 
@@ -522,15 +529,38 @@ class BaseTask:
         if not final_obs_dict:
             return
         final_store = self.extras.setdefault("final_observations", {})
+
+        def _store_value(store_parent, key, value, template):
+            # A concatenate=False group is a dict of per-term tensors; recurse one level so the
+            # per-env final-obs copy works for image groups too (env-axis is dim 0 either way).
+            if isinstance(value, dict):
+                sub = store_parent.setdefault(key, {})
+                for sub_key, sub_val in value.items():
+                    _store_value(sub, sub_key, sub_val, template[sub_key])
+                return
+            if key not in store_parent:
+                store_parent[key] = torch.zeros_like(template)
+            store_parent[key][env_ids] = value[env_ids]
+
         for obs_key, values in final_obs_dict.items():
-            if obs_key not in final_store:
-                final_store[obs_key] = torch.zeros_like(self.obs_buf_dict[obs_key])
-            final_store[obs_key][env_ids] = values[env_ids]
+            _store_value(final_store, obs_key, values, self.obs_buf_dict[obs_key])
 
     def _clip_observations(self):
         clip_limit = self.observation_manager.cfg.clip_observations
+
+        def _clip_value(value):
+            # A concatenate=False group is a dict of per-term tensors; recurse one level.
+            if isinstance(value, dict):
+                return {k: _clip_value(v) for k, v in value.items()}
+            # Only clip flat (2-D [N, feature]) float observations. Image/depth terms
+            # ([N, H, W, C]) are not bounded observations and clipping would corrupt them
+            # (e.g. collapse the depth +inf no-hit sentinel to clip_limit).
+            if isinstance(value, torch.Tensor) and value.is_floating_point() and value.ndim == 2:
+                return torch.clip(value, -clip_limit, clip_limit)
+            return value
+
         for obs_key, obs_val in self.obs_buf_dict.items():
-            self.obs_buf_dict[obs_key] = torch.clip(obs_val, -clip_limit, clip_limit)
+            self.obs_buf_dict[obs_key] = _clip_value(obs_val)
 
     def _compute_reward(self):
         self.rew_buf[:] = self.reward_manager.compute(self.dt)

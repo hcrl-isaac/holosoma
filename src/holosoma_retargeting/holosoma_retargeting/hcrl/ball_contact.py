@@ -2,7 +2,7 @@
 
 Retargeting shrinks the human to robot height, so every distance in the motion shrinks with it -- but
 a real ball keeps its radius. A foot that was tangent to the ball for the human therefore ends up
-``(1 - scale) * radius`` INSIDE it for the robot, and the kick geometry is wrong. The retargeter
+``(1 - scale) * radius`` inside it for the robot, and the kick geometry is wrong. The retargeter
 takes ball centres plus these foot points and keeps the foot out of the sphere.
 """
 
@@ -11,13 +11,12 @@ from __future__ import annotations
 import mujoco
 import numpy as np
 
-# Soccer-X's own ball, measured from the resting centre height of slow ground-level frames
-# (0.1004 +- 0.0089 m). The source sidecar's clearances are measured against it, so changing it means
+# Soccer-X's ball radius. The source sidecar's clearances are measured against it, so changing it means
 # regenerating them (``soccerx_source``) as well as re-solving.
 BALL_RADIUS_M = 0.10
 
-# No ball travels this far in one 30 fps frame (45 m/s); a step past it is a dropout in the track,
-# and a bogus centre that lands on a foot would shove it aside for no reason.
+# A ball step past this in one 30 fps frame (45 m/s) is a track dropout, whose bogus centre would
+# otherwise shove a foot aside.
 BALL_STEP_MAX_M = 1.5
 
 # Cap on the clearance the robot is asked to reproduce. At 0 the target is pure non-penetration:
@@ -61,10 +60,8 @@ def foot_surface_points(model: mujoco.MjModel, foot_links: dict[str, str], voxel
 def to_solver_frame(ball: np.ndarray, scale: float, radius: float = BALL_RADIUS_M) -> np.ndarray:
     """Map source-frame ball centres into the frame the retargeting targets live in.
 
-    Ground-plane distances scale with the human, so xy follows ``preprocess_motion_data``. Height
-    does not: a resting ball sits at its own radius whatever the player's size, so only the clearance
-    above that scales. Both are referenced to the source's own ground plane, which is where the sole
-    terms park the robot -- not to the deeper ``z_min`` the keypoints are dropped by.
+    Xy scales with the human, while a resting ball keeps its own radius, so only the clearance above it
+    scales. Both are referenced to the source's own ground plane.
 
     Args:
         ball: Ball centres of shape (T, 3), in the source npz frame.
@@ -87,9 +84,8 @@ def to_solver_frame(ball: np.ndarray, scale: float, radius: float = BALL_RADIUS_
 def target_clearance(ball_gap: np.ndarray, band: float = BALL_CLEARANCE_BAND_M) -> np.ndarray:
     """Clearance the robot's foot must keep from the ball surface, per frame and foot.
 
-    The human's own clearance is an ABSOLUTE distance to an object that never shrank, so it carries
-    across unscaled. Where the source itself has the ball inside the foot the target is negative:
-    retargeting must not deepen a mocap registration error, but it cannot undo one either.
+    The human's clearance carries across unscaled because the ball never shrank, so a source
+    penetration stays a negative target.
 
     Args:
         ball_gap: The human's foot-to-ball-surface distance, shape (T, 2).
@@ -132,7 +128,7 @@ def ball_gaps(
             continue
         data.qpos[:] = row
         mujoco.mj_forward(model, data)
-        for k, (side, body_id) in enumerate(zip(sides, ids, strict=True)):
+        for k, (side, body_id) in enumerate(zip(sides, ids)):
             pts = data.xpos[body_id] + foot_points[side] @ data.xmat[body_id].reshape(3, 3).T
             gaps[t, k] = np.linalg.norm(pts - centre, axis=1).min() - radius
     return gaps
@@ -147,15 +143,13 @@ def ball_score(gaps: np.ndarray, targets: np.ndarray | None = None) -> dict[str,
             them the deficit is measured against plain non-penetration.
 
     Returns:
-        Dict of metric name to value. ``ball_deficit_m`` is the shipping number -- how much closer
-        to the ball than the human was the retarget ever puts a foot -- and must be ~0.
+        Dict of metric name to value. ``ball_deficit_m`` (how much closer than the human a foot ever
+        gets to the ball) should be ~0.
     """
     keep = np.isfinite(gaps).any(axis=1)
     if not keep.any():
-        return dict.fromkeys(
-            ("ball_frames", "ball_closest_gap_m", "ball_penetration_frac", "ball_deficit_m", "ball_deficit_frac"),
-            float("nan"),
-        ) | {"ball_frames": 0.0}
+        keys = ("ball_closest_gap_m", "ball_penetration_frac", "ball_deficit_m", "ball_deficit_frac")
+        return {"ball_frames": 0.0, **dict.fromkeys(keys, float("nan"))}
     per_frame = np.nanmin(gaps[keep], axis=1)
     want = np.zeros_like(gaps) if targets is None else np.asarray(targets, dtype=float)
     deficit = np.nanmax(np.maximum(want[keep] - gaps[keep], 0.0), axis=1)

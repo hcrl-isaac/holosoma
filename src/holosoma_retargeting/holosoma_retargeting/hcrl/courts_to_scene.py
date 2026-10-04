@@ -11,7 +11,6 @@ import argparse
 import json
 from pathlib import Path
 
-import numpy as np
 import trimesh
 
 PKG_ROOT = Path(__file__).resolve().parents[1]
@@ -42,7 +41,13 @@ URDF_LINK = """  <link name="multi_boxes_link_{i}">
 
 
 def build_court_files(court: dict, seq_dir: Path, robot_xml: Path) -> None:
-    """Write the climbing terrain file set for one court into one seq dir."""
+    """Write the climbing terrain file set for one court into one seq dir.
+
+    Args:
+        court: One ``courts.json`` court, whose ``prims`` each carry a ``pos`` and ``size``.
+        seq_dir: The clip's seq dir to write into.
+        robot_xml: Base robot mujoco xml that the scene xml extends.
+    """
     prims = court["prims"]
     box_dir = seq_dir / "box_models"
     box_dir.mkdir(parents=True, exist_ok=True)

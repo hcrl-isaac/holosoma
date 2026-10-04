@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import logging
 import sys
 import time
+from importlib.metadata import version
 from pathlib import Path
 from types import ModuleType
 
@@ -19,12 +21,17 @@ from viser.extras import ViserUrdf  # type: ignore[import-not-found]
 from holosoma_retargeting.config_types.data_type import root_keypoint
 from holosoma_retargeting.config_types.retargeter import FootLockConfig, SelfCollisionConfig
 
+logger = logging.getLogger(__name__)
+
 # Substrings identifying arm keypoints in a joint mapping, across source formats.
 _ARM_KEYPOINT_PARTS = ("shoulder", "elbow", "wrist", "hand")
 
-# Foot points pushed out of the ball per side per frame. The deepest one drives the correction; the
+# Foot points pushed out of the ball per side per frame. The deepest one drives the correction and the
 # rest pin the rotation the rigid foot would otherwise use to dodge it.
 BALL_CONTACT_POINTS = 6
+
+# packages whose versions decide the solve's output, recorded in every result file
+SOLVER_PACKAGES = ("mujoco", "cvxpy", "clarabel")
 
 # Add src to path for direct execution
 src_path = Path(__file__).parent.parent / "src"
@@ -111,77 +118,94 @@ class InteractionMeshRetargeter:
         self.smplh_mapped_joint_indices = [self.demo_joints.index(name) for name in self.laplacian_match_links]
 
         # Setup weights and parameters
-        self.laplacian_weights = 10
+        self.laplacian_weights: float = 10
         self.smooth_weight = 0.2
         self.accel_damp_weight = 0.0  # acceleration damping: zero-cost at constant velocity (anti-oscillation)
-        self.foot_step_max_seq = None  # optional (T, 2) [left, right] per-frame toe-step caps (flight phases)
+        self.foot_step_max_seq: np.ndarray | None = (
+            None  # optional (T, 2) [left, right] per-frame toe-step caps (flight phases)
+        )
         # Teleporting feet are excluded by bounding Cartesian toe speed, which depends on neither
         # terrain nor contact detection -- so it is not tied to foot_lock.
         self.teleport_guard = True
-        # Source sole-plane normals (T, 2, 3) for [left, right]; without them nothing pins foot
-        # pitch/roll, because the joint mapping gives each foot only an ankle and a toe point.
-        self.sole_normal_seq = None
+        # Source sole-plane normals (T, 2, 3) for [left, right], which pin the foot pitch/roll that the
+        # mapped ankle and toe points leave free.
+        self.sole_normal_seq: np.ndarray | None = None
         self.sole_normal_weight = 0.0
-        # Source sole ground heights (T, 2); flattening alone lifts the sole, so stance also needs a height.
-        self.sole_height_seq = None
+        # Source sole ground heights (T, 2), since flattening a sole alone lifts it off the ground.
+        self.sole_height_seq: np.ndarray | None = None
         self.sole_height_weight = 0.0
         self.sole_planted_height = 0.03
         self._sole_body_id_cache: dict[str, list[int]] = {}
-        # Solver-frame centres (T, 3) of an object that does NOT scale with the human, with the foot
-        # surface points to keep out of it; NaN rows mean "no object this frame".
-        self.ball_seq = None
-        self.ball_clearance_seq = None  # (T, 2) [left, right] clearance each foot must keep from it
-        self.ball_foot_points = None
+        self._foot_geoms: frozenset[int] | None = None
+        # Solver-frame centres (T, 3) of an object that does not scale with the human (NaN where absent),
+        # and the foot surface points kept out of it.
+        self.ball_seq: np.ndarray | None = None
+        self.ball_clearance_seq: np.ndarray | None = None  # (T, 2) [left, right] clearance each foot must keep from it
+        self.ball_foot_points: dict[str, np.ndarray] | None = None
         self.ball_radius = 0.0
         self.ball_weight = 0.0
-        self.foot_orient_weight = 0.0  # stance-engagement foot angular-rate damping (0 = off; _foot_orient_damp)
+        self.foot_orient_weight = 0.0  # stance-engagement foot angular-rate damping (0 = off, see _foot_orient_damp)
         self.joint_limit_barrier_weight = 0.0  # one-sided hinge inside `margin` of an actuated stop
-        self.joint_limit_barrier_margin = 0.0  # rad, absolute cap; 0 disables the barrier
+        self.joint_limit_barrier_margin = 0.0  # absolute cap (rad), 0 disables the barrier
         self.joint_limit_barrier_margin_frac = 0.15  # and never more than this fraction of the range
-        self.joint_limit_barrier_min_range = 0.15  # rad; below this the joint is a deliberate clamp, skip
-        self.joint_limit_barrier_joints = None  # optional (name, ...): barrier ONLY these joints
+        self.joint_limit_barrier_min_range = 0.15  # rad, a narrower range is a deliberate clamp and is skipped
+        self.joint_limit_barrier_joints: tuple[str, ...] | None = (
+            None  # optional (name, ...): barrier only these joints
+        )
         self.pelvis_track_weight = 0.0  # source-pelvis position prior (kills the pelvis<->waist null space)
         self.arm_reg_weight = 0.0  # source-arm position prior (stops the solver parking a redundant arm)
-        self.root_rate_weight = 0.0  # match the SOURCE root angular rate (kills inferred-torso jitter)
-        self.joint_angle_weight = 0.0  # track SOURCE anatomical joint angles, not just keypoint positions
-        self.keypoint_track_weight = 0.0  # absolute position prior on EVERY mapped keypoint
-        self.ball_track = None  # (T, 3) ball positions in the SOLVE frame (scaled + shifted)
-        self.ball_contacts = ()  # tuples (toe_link_name, start, end, r0) in solve scale
+        self.joint_angle_weight = 0.0  # track source anatomical joint angles, not just keypoint positions
+        self.keypoint_track_weight = 0.0  # absolute position prior on every mapped keypoint
+        self.ball_track: np.ndarray | None = None  # (T, 3) ball positions in the solve frame (scaled + shifted)
+        self.ball_contacts: tuple[
+            tuple[str, int, int, float], ...
+        ] = ()  # tuples (toe_link_name, start, end, r0) in solve scale
         self.ball_tolerance = 0.005  # m, slack either side of r0
-        self.joint_angle_targets = None  # {joint name: (T,) target angle in rad}
-        self.root_quat_track = None  # (T, 4) wxyz source root orientation, or None
+        self.joint_angle_targets: dict[str, np.ndarray] | None = None  # {joint name: (T,) target angle in rad}
         self.swing_ankle_weight = 0.0  # neutral-ankle prior while a foot is in free swing
         # Source foot heading (T, 2) [left, right], rad about +z: an ankle and a toe point leave the
         # sole's yaw to a 0.13 m lever, so the robot foot's own forward axis is steered to it.
-        self.foot_yaw_seq = None
+        self.foot_yaw_seq: np.ndarray | None = None
         self.foot_yaw_weight = 0.0
-        self.toe_kp_indices = None  # positions of the toe keypoints in the joint mapping (ground anchoring)
-        self.hip_kp_indices = None  # (left, right) hip keypoint positions in the mapping (lateral axis)
-        self.ankle_kp_indices = None
-        self.foot_min_sep = 0.0  # m; minimum lateral toe separation the targets are widened to
+        self.toe_kp_indices: list[int] | None = (
+            None  # positions of the toe keypoints in the joint mapping (ground anchoring)
+        )
+        self.hip_kp_indices: list[int] | None = (
+            None  # (left, right) hip keypoint positions in the mapping (lateral axis)
+        )
+        self.ankle_kp_indices: list[int] | None = None
+        self.foot_min_sep = 0.0  # minimum lateral toe separation (m) the targets are widened to
+        self.ankle_kp_cols: np.ndarray | None = None  # (left, right) ankle columns in the source joints
+        self.ground_kp_offset = 0.0  # planted toe target height above the robot toe (m)
+        self.limb_retarget = False  # rescale source keypoints to the robot's segment lengths
+        self.toe_floor_clamp = True  # never command a toe target below the sole on flat ground
+        self.solve_n_iter = 0  # SQP iterations per frame, 0 = the solver's default
+        self.debug_terms = False  # log each objective term's value every debug_terms_every frames
+        self.debug_terms_every = 25
+        self._dump_targets: list | None = None  # per-frame solver targets, when dumping them
         self.self_collision_escape = 0.02  # m per SQP iteration a violated pair may separate
-        self.self_collision_margin = 0.0  # m; soft repulsion starts here (0 = off)
+        self.self_collision_margin = 0.0  # soft repulsion starts inside this distance (m, 0 = off)
         self.self_collision_margin_weight = 0.0
-        self.ground_margin = 0.0  # m; soft cushion above the ground for non-foot bodies (0 = off)
+        self.ground_margin = 0.0  # soft cushion above the ground for non-foot bodies (m, 0 = off)
         self.body_contact_gain = 0.0  # temporal smoothing x (1 + gain * non-foot bodies on the ground)
         self.body_contact_root = 0.0  # root-orientation smoothing added per non-foot body on the ground
         self.ground_margin_weight = 200.0
         self.foot_stack_clearance = 0.0  # m of extra vertical gap a crossing foot keeps over the stance foot
-        self.foot_stack_thickness = 0.035  # m; foot body origin to its top surface
-        self.foot_stack_half_width = 0.05  # m; footprint half extents, for the plan-overlap test
+        self.foot_stack_thickness = 0.035  # foot body origin to its top surface (m)
+        self.foot_stack_half_width = 0.05  # footprint half extents (m) for the plan-overlap test
         self.foot_stack_half_length = 0.11
         self.foot_stack_weight = 100.0
         # Per-frame posture cost on the upper-arm twist rows: (T, 2) weights, used when the source elbow is
         # nearly straight and the swivel is undefined, so the twist does not wander into a branch.
-        self.twist_prior_seq = None
-        self.twist_rows = None
+        self.twist_prior_seq: np.ndarray | None = None
+        self.twist_rows: list[int] | None = None
         # Arm-plane matching: (shoulder, elbow, wrist) keypoint-name triples whose plane normal is
         # steered to the source's, which fixes the elbow swivel branch without a joint target.
-        self.arm_plane_triples = ()
+        self.arm_plane_triples: tuple[tuple[str, str, str], ...] = ()
         self.arm_plane_weight = 0.0
         # Tolerance for foot sticking constraints in x, y.
         self.foot_sticking_tolerance = foot_sticking_tolerance
-        self.stick_tol_seq = None  # optional (T, 2) per-frame [left, right] sticking band, metres
+        self.stick_tol_seq: np.ndarray | None = None  # optional (T, 2) per-frame [left, right] sticking band, metres
         self._init_foot_lock(foot_lock)
         self._self_collision_config = self_collision
 
@@ -207,7 +231,6 @@ class InteractionMeshRetargeter:
             self.has_dynamic_object = True
         else:
             self.has_dynamic_object = False
-
         self.nq = self.robot_model.nq
 
         self.q_a_init_idx = q_a_init_idx
@@ -242,8 +265,7 @@ class InteractionMeshRetargeter:
         # quaternion whose MANUAL_LB/UB box is +-1), which must never see the joint-limit barrier.
         self._actuated_rows = np.flatnonzero(self.q_a_indices >= 7)
         self._ankle_rows = {
-            side: self._resolve_joint_rows(tuple(joints))
-            for side, joints in self.task_constants.ANKLE_JOINTS.items()
+            side: self._resolve_joint_rows(tuple(joints)) for side, joints in self.task_constants.ANKLE_JOINTS.items()
         }
         # Keypoint priors index the joint mapping, whose order and names vary by source format.
         match_names = list(self.laplacian_match_links.keys())
@@ -263,17 +285,11 @@ class InteractionMeshRetargeter:
         self.track_nominal_indices = task_constants.NOMINAL_TRACKING_INDICES
 
     def _barrier_rows_and_margins(self) -> tuple[np.ndarray, np.ndarray]:
-        """Actuated dqa rows that get a joint-limit barrier, and each one's margin (rad).
+        """Select the actuated dqa rows that get a joint-limit barrier, with each one's margin.
 
-        The margin is RELATIVE (a fraction of the joint's own range, capped by the absolute value):
-        a flat margin would spend 38% of ankle_roll's tiny +-0.262 range, and `edge` clips genuinely
-        need that range. Joints deliberately clamped to a sliver -- wrist_yaw is held at +-0.05 rad on
-        purpose, and is the most "saturated" joint in the corpus BY DESIGN -- are skipped outright.
-
-        ``joint_limit_barrier_joints`` narrows it further to a named set. A BLANKET barrier measurably
-        fights stairs descent (lowering the body wants knee/ankle near their stops, and `settle`
-        regresses); restricting it to the joints where saturation is an actual measured defect keeps
-        the rest of the leg free.
+        Returns:
+            ``(rows, margins)``: the barrier rows (``joint_limit_barrier_joints`` when set, minus deliberate
+            clamps) and each margin in rad, a fraction of the joint's range capped by the absolute margin.
         """
         rows = (
             self._actuated_rows
@@ -283,11 +299,19 @@ class InteractionMeshRetargeter:
         rng = self.q_a_ub[rows] - self.q_a_lb[rows]
         keep = rng > self.joint_limit_barrier_min_range
         rows, rng = rows[keep], rng[keep]
+        # relative margins, so a narrow joint such as ankle roll keeps most of its range
         margins = np.minimum(float(self.joint_limit_barrier_margin), self.joint_limit_barrier_margin_frac * rng)
         return rows, margins
 
     def _resolve_joint_rows(self, joint_names: tuple[str, ...]) -> np.ndarray:
-        """dqa rows for named joints (qpos address -> position within q_a_indices); absent names are skipped."""
+        """Map joint names to their dqa rows (positions within ``q_a_indices``).
+
+        Args:
+            joint_names: Robot joint names; names the model lacks are skipped.
+
+        Returns:
+            The rows, in ``joint_names`` order.
+        """
         rows = []
         for name in joint_names:
             try:
@@ -303,7 +327,7 @@ class InteractionMeshRetargeter:
     def _init_foot_lock(self, foot_lock: FootLockConfig | None) -> None:
         """Initialize foot lock configuration and normalize window mappings."""
         self.foot_lock = foot_lock or FootLockConfig()
-        self._foot_lock_windows: dict[str, tuple[tuple[int, int], ...]] = {"left": (), "right": ()}
+        self._foot_lock_windows: dict[str, tuple[tuple, ...]] = {"left": (), "right": ()}
         if self.foot_lock.windows is None:
             return
         for key, windows in self.foot_lock.windows.items():
@@ -315,8 +339,7 @@ class InteractionMeshRetargeter:
                 side = "right"
             if side is None:
                 continue
-            # windows may be (start, end), (start, end, z), (start, end, x, y, z), or additionally carry
-            # a stance attitude (start, end, x, y, z, yaw, pitch); normalize to
+            # (start, end[, z_floor]) or (start, end, x, y, z[, yaw, pitch]), normalized to
             # (start, end, x|None, y|None, z|None, yaw|None, pitch|None)
             normalized_windows: list[tuple] = []
             for window in windows:
@@ -502,20 +525,15 @@ class InteractionMeshRetargeter:
             self.draw_keypoints(q, name=f"{group_name}_q", rgba=(0.0, 1.0, 0.0, 1.0))
             self.draw_keypoints(c, name=f"{group_name}_c", rgba=(1.0, 0.0, 0.0, 1.0))
 
-
     def _apply_limb_retarget(self, human_joint_motions):
-        """Rescale the mapped source keypoints to the robot's own segment lengths.
-
-        A uniform height scale keeps human proportions, so on a robot with different proportions the
-        mapped targets are unreachable and the IK saturates joints spanning them. Rescaling per segment
-        keeps bone directions and gives the solver reachable targets. Off by default; enable with
-        ``limb_retarget=True``.
+        """Shape the source targets for the robot: limb rescale, ground offset, foot widening, toe clamp.
 
         Args:
             human_joint_motions: ``(T, J, 3)`` source joints.
 
         Returns:
-            ``(T, J, 3)`` with the mapped keypoints rescaled; other joints untouched.
+            ``(T, J, 3)`` joints lowered by ``ground_kp_offset``, with the mapped keypoints rescaled to the
+            robot's segment lengths when ``limb_retarget`` is set.
         """
         offset = float(getattr(self, "ground_kp_offset", 0.0))  # planted toe target height above the robot toe
         if not getattr(self, "limb_retarget", False):
@@ -539,10 +557,8 @@ class InteractionMeshRetargeter:
         kp = out[:, self.smplh_mapped_joint_indices]
         toe_names = [names[i] for i in (self.toe_kp_indices or ())]
         new_kp = rescale_to_robot_limbs(kp, names, parent, length, rigid, horizontal=toe_names)
-        # The rescale grows from the root, so a shorter robot leg lifts the feet off the floor by the
-        # length difference; keep the lower toe's height instead (less the calibrated toe offset),
-        # which is the ground contact. One keypoint per frame, so the body cannot hop when the
-        # lowest point would switch between feet.
+        # The rescale grows from the root and would lift the feet, so keep the lower toe's height (less the
+        # toe offset), one toe per frame so the body cannot hop when the lowest point switches feet.
         if self.toe_kp_indices:
             toes = np.asarray(self.toe_kp_indices)
             lo = toes[np.argmin(kp[:, toes, 2], axis=1)]
@@ -552,11 +568,15 @@ class InteractionMeshRetargeter:
             dz = kp[:, :, 2].min(axis=1) - offset - new_kp[:, :, 2].min(axis=1)
         out += dz[:, None, None] * np.array([0.0, 0.0, 1.0])
         out[:, self.smplh_mapped_joint_indices] = new_kp + (out[:, self.smplh_mapped_joint_indices] - kp)
-        # Human feet pass closer than the robot's feet are wide; instead of letting self-collision resolve
-        # that at contact, widen each foot's targets laterally (about the pelvis heading) by half the
-        # shortfall, so the solve anticipates the robot's foot width.
+        # Human feet pass closer than the robot's feet are wide, so widen each foot's targets laterally by
+        # half the shortfall rather than leave self-collision to resolve it at contact.
         min_sep = float(getattr(self, "foot_min_sep", 0.0))
-        if min_sep > 0 and self.toe_kp_indices and len(self.toe_kp_indices) == 2 and getattr(self, "hip_kp_indices", None):
+        if (
+            min_sep > 0
+            and self.toe_kp_indices
+            and len(self.toe_kp_indices) == 2
+            and getattr(self, "hip_kp_indices", None)
+        ):
             mapped = np.asarray(self.smplh_mapped_joint_indices)
             hl, hr = (mapped[i] for i in self.hip_kp_indices)
             lat = out[:, hl, :2] - out[:, hr, :2]  # left-pointing lateral axis
@@ -571,9 +591,14 @@ class InteractionMeshRetargeter:
                 out[:, c, :2] += shift
             for c in cols_r:
                 out[:, c, :2] -= shift
-        # On flat ground a toe target below the sole is source noise the non-penetration constraint
-        # will refuse anyway; asking for it only drags the body down at foot strike.
-        if self.toe_kp_indices and self.object_name == "ground" and offset != 0.0 and getattr(self, "toe_floor_clamp", True):
+        # On flat ground a toe target below the sole is source noise that non-penetration refuses anyway,
+        # and asking for it drags the body down at foot strike.
+        if (
+            self.toe_kp_indices
+            and self.object_name == "ground"
+            and offset != 0.0
+            and getattr(self, "toe_floor_clamp", True)
+        ):
             toe_cols = np.asarray(self.smplh_mapped_joint_indices)[np.asarray(self.toe_kp_indices)]
             lift = np.maximum(0.005 - out[:, toe_cols, 2], 0.0)  # (T, 2)
             out[:, toe_cols, 2] += lift
@@ -603,8 +628,10 @@ class InteractionMeshRetargeter:
             human_joint_motions (np.ndarray): (num_frames, num_joints, 3) array.
             object_poses (np.ndarray): (num_frames, 7) array of demo object poses (quat, trans).
             object_poses_augmented (np.ndarray): (num_frames, 7) array of augmented object poses (quat, trans).
-            object_points_local_demo (np.ndarray): Demo object points in local frame (rest pose).
-            object_points_local (np.ndarray): Current object points in local frame (rest pose).
+            object_points_local_demo (np.ndarray | list[np.ndarray]): Demo object points in local frame.
+                Single array for static points, or list of num_frames arrays for per-frame points.
+            object_points_local (np.ndarray | list[np.ndarray]): Current object points in local frame.
+                Single array for static points, or list of num_frames arrays for per-frame points.
             foot_sticking_sequences (list): List of foot sticking sequences for each frame.
             q_a_init (np.ndarray, optional): Initial robot configuration.
             q_a_nominal (np.ndarray, optional): Nominal robot configuration.
@@ -613,16 +640,25 @@ class InteractionMeshRetargeter:
             tuple: (retargeted_motions, obj_pts_demo_list, obj_pts_list, tetrahedra)
         """
         human_joint_motions = self._apply_limb_retarget(human_joint_motions)
+        self._warn_inert_terms()
 
         num_frames = human_joint_motions.shape[0]
+        if isinstance(object_points_local_demo, list):
+            assert len(object_points_local_demo) == num_frames, (
+                f"object_points_local_demo length {len(object_points_local_demo)} != num_frames {num_frames}"
+            )
+        if isinstance(object_points_local, list):
+            assert len(object_points_local) == num_frames, (
+                f"object_points_local length {len(object_points_local)} != num_frames {num_frames}"
+            )
         if q_nominal_list is not None:
             q_locked_list = q_nominal_list
         else:
             q_locked_list = np.zeros((num_frames, self.nq))
             q_locked_list[0, self.q_a_indices] = q_a_init
 
-        # Only a dynamic object owns the last 7 qpos slots; on a ground scene they are the right leg,
-        # and the identity object pose would seed Right_Hip_Yaw at 1.0 (its stop) on every clip.
+        # Only a dynamic object owns the last 7 qpos slots. On a ground scene they are the right leg, which
+        # an identity object pose would seed at Right_Hip_Yaw's stop.
         if self.has_dynamic_object:
             q_locked_list[:, -7:] = object_poses_augmented
         q = np.copy(q_locked_list[0])
@@ -652,8 +688,16 @@ class InteractionMeshRetargeter:
                         object_quat_demo, object_trans_demo, human_mapped_joints
                     )
 
+                # Per-frame or static object points
+                obj_pts_demo_i = (
+                    object_points_local_demo[i]
+                    if isinstance(object_points_local_demo, list)
+                    else object_points_local_demo
+                )
+                obj_pts_i = object_points_local[i] if isinstance(object_points_local, list) else object_points_local
+
                 source_vertices, source_tetrahedra = create_interaction_mesh(
-                    np.vstack([human_mapped_joints_in_object, object_points_local_demo])
+                    np.vstack([human_mapped_joints_in_object, obj_pts_demo_i])
                 )
                 tetrahedra.append(source_tetrahedra)
 
@@ -661,10 +705,8 @@ class InteractionMeshRetargeter:
                     # Only for visualization
                     object_quat = object_poses_augmented[i, 3:]
                     object_trans = object_poses_augmented[i, :3]
-                    obj_pts_demo = transform_points_local_to_world(
-                        object_quat_demo, object_trans_demo, object_points_local_demo
-                    )
-                    obj_pts = transform_points_local_to_world(object_quat, object_trans, object_points_local)
+                    obj_pts_demo = transform_points_local_to_world(object_quat_demo, object_trans_demo, obj_pts_demo_i)
+                    obj_pts = transform_points_local_to_world(object_quat, object_trans, obj_pts_i)
 
                     obj_pts_demo_list.append(obj_pts_demo)
                     obj_pts_list.append(obj_pts)
@@ -692,7 +734,7 @@ class InteractionMeshRetargeter:
                     q_t_last=retargeted_motions[-1],
                     target_laplacian=target_laplacian,
                     adj_list=adj_list,
-                    obj_pts_local=object_points_local,
+                    obj_pts_local=obj_pts_i,
                     foot_sticking=foot_sticking_sequences[i],
                     w_nominal_tracking=w_nominal_tracking,
                     q_a_nominal=(q_nominal_list[i, self.q_a_indices] if q_nominal_list is not None else None),
@@ -734,8 +776,7 @@ class InteractionMeshRetargeter:
                 handle.remove()
             robot_kpts_handle_list.clear()
 
-        # Save results. The ball rides along: downstream contact is only right against the same
-        # centres the clearance term solved against.
+        # Save results, with the ball centres the clearance term solved against for downstream contact checks
         extras = {} if self.ball_seq is None else {"ball": np.asarray(self.ball_seq, dtype=np.float32)}
         np.savez(
             dest_res_path,
@@ -743,6 +784,7 @@ class InteractionMeshRetargeter:
             human_joints=human_joint_motions,
             fps=30,
             cost=cost,
+            solver_versions=np.array(" ".join(f"{p}=={version(p)}" for p in SOLVER_PACKAGES)),
             **extras,
         )
         print("Saving results to path:", dest_res_path)
@@ -810,8 +852,8 @@ class InteractionMeshRetargeter:
             obj_original: the original object pose (used for contact matching).
             init_t: the current time step is the first time step.
             frame_idx: frame index used by explicit foot lock window constraints.
-            human_src_pts: (15, 3) scaled source keypoints for this frame, in the SAME frame as
-                ``p_OC_dict`` (object frame), i.e. what the Laplacian target was built from.
+            human_src_pts: (15, 3) scaled source keypoints for this frame, in the same (object) frame as
+                ``p_OC_dict``, i.e. what the Laplacian target was built from.
         """
         assert len(q_a_n_last) == self.nq_a
 
@@ -868,14 +910,13 @@ class InteractionMeshRetargeter:
         # Foot constraints (sticking + foot lock window Z pinning)
         apply_foot_sticking = (self.q_a_init_idx < 12) and self.activate_foot_sticking
         apply_foot_lock = (self.q_a_init_idx < 12) and self.foot_lock.enable
-        foot_anchor_terms = []
+        foot_anchor_terms: list = []
         foot_orient_terms = []
         if apply_foot_sticking or apply_foot_lock:
             J_WF_dict, p_WF_dict, _ = self._calc_manipulator_jacobians(q, links=self.foot_links, obj_frame=False)
 
-            # HARD Cartesian foot velocity cap (every frame, both feet): constraint releases and mesh
-            # pulls must never teleport a foot -- physically impossible foot motion is excluded in the
-            # QP itself rather than depending on contact detection being right. Cap per 30 fps frame.
+            # Hard per-frame Cartesian toe-step cap, so constraint releases and mesh pulls cannot teleport
+            # a foot regardless of contact detection.
             if self.teleport_guard and not init_t:
                 _, p_last_all, _ = self._calc_manipulator_jacobians(q_t_last, links=self.foot_links, obj_frame=False)
                 for key, J_WF in J_WF_dict.items():
@@ -910,11 +951,13 @@ class InteractionMeshRetargeter:
                     apply_left = ("left" in key) and foot_sticking[left_key] and not anchor_active
                     apply_right = ("right" in key) and foot_sticking[right_key] and not anchor_active
                     if apply_left or apply_right:
-                        # A fixed 1 mm band stops a settling foot dead and releases it with a jump;
-                        # let the stance foot move as far as the SOURCE foot moved this frame.
+                        # let the stance foot move as far as the source foot moved this frame, since a fixed
+                        # 1 mm band stops a settling foot dead and releases it with a jump
                         tol = self.foot_sticking_tolerance
                         if self.stick_tol_seq is not None:
-                            tol = float(self.stick_tol_seq[min(frame_idx, len(self.stick_tol_seq) - 1), 0 if apply_left else 1])
+                            tol = float(
+                                self.stick_tol_seq[min(frame_idx, len(self.stick_tol_seq) - 1), 0 if apply_left else 1]
+                            )
                         p_lb = p_WF_t_last_dict[key] - p_WF_dict[key] - tol
                         p_ub = p_lb + 2 * tol  # symmetric window
 
@@ -932,8 +975,7 @@ class InteractionMeshRetargeter:
                         continue
                     anchor = self._foot_lock_anchor(key, frame_idx)
                     if anchor is None:
-                        # anticipatory approach shaping: blend the last 4 swing frames toward the
-                        # UPCOMING anchor (cosine ramp into t0) so the foot arrives with ~0 settle
+                        # pull the last swing frames toward the upcoming anchor so the foot arrives settled
                         a_ramp, approach = self._foot_approach_anchor(key, frame_idx)
                         if approach is not None and not init_t:
                             p_now = p_WF_dict[key]
@@ -943,10 +985,8 @@ class InteractionMeshRetargeter:
                                 foot_anchor_terms.append(a_ramp * cp.square(Ja @ dqa - delta))
                         continue
 
-                    # strong SOFT pull toward the source plant position (<= 4 cm/frame/axis). A hard
-                    # band is jointly infeasible whenever the lagging foot's straight-line path to the
-                    # anchor grazes terrain (non-penetration blocks the required step); as an objective,
-                    # non-penetration steers the foot around the corner over a few frames instead.
+                    # soft pull to the source plant (<= 4 cm/frame/axis): a hard band turns infeasible when
+                    # the path to the anchor grazes terrain, while a cost lets non-penetration steer around it
                     p_now = p_WF_dict[key]
                     for axis, a_val in enumerate(anchor):
                         if a_val is None:
@@ -955,35 +995,31 @@ class InteractionMeshRetargeter:
                         Ja = J_WF[axis, self.q_a_indices]
                         foot_anchor_terms.append(cp.square(Ja @ dqa - delta))
 
-            # Soft foot-orientation ENGAGEMENT DAMPING: position pins alone let the ankle snap to a
-            # constraint-consistent attitude the frame a window binds. Penalize the foot's per-frame
-            # rotation (relative to the previous FRAME, so SQP iterations cannot compound it) through
-            # the first ~0.2 s of each window -- the foot still reaches whatever attitude its own
-            # geometry settles into, just smoothly. See _foot_orient_damp; swing/mid-stance untouched.
+            # damp the foot's rotation from the previous frame (not the iterate) as a stance window binds
             if apply_foot_lock and self.foot_orient_weight > 0 and not init_t:
                 for side in ("left", "right"):
                     w_damp = self._foot_orient_damp(side, frame_idx)
-                    if w_damp <= 0:
+                    bid = self._body_id(self.task_constants.FOOT_LINKS[side])
+                    if w_damp <= 0 or bid < 0:
                         continue
-                    bid = mujoco.mj_name2id(
-                        self.robot_model, mujoco.mjtObj.mjOBJ_BODY, f"{side}_ankle_roll_link"
-                    )
                     R_last = self._body_rot(q_t_last, bid)
                     R_now = self._body_rot(q, bid)  # also restores FK(q) for the Jacobian below
                     Jr = self._calc_rot_jacobian(bid)[:, self.q_a_indices]
                     accrued = Rotation.from_matrix(R_now @ R_last.T).as_rotvec()
                     foot_orient_terms.append(w_damp * cp.sum_squares(Jr @ dqa + accrued))
 
-        # Non-penetration constraints. Sources can START inside geometry (that is the defect being
-        # cleaned); demanding full escape in one linearized step is jointly infeasible, so cap the
-        # per-iteration escape rate -- existing penetration decays over a few iterations instead.
+        # Non-penetration constraints with a capped per-iteration escape, because a source can start inside
+        # geometry and full escape in one linearized step is infeasible.
         Js, phis = self._update_jacobians_and_phis_from_q(q)
         ground_soft = []
         # bodies other than the feet touching the ground: a body lying on the floor is held by many
         # contacts against targets it cannot reach, and the root rocks as the active set switches
         n_body_ground = sum(
-            1 for key, phi in phis.items()
-            if phi < 0.01 and any("ground" in self._geom_names[g] for g in key) and not any("foot" in self._geom_names[g] for g in key)
+            1
+            for key, phi in phis.items()
+            if phi < 0.01
+            and any("ground" in self._geom_names[g] for g in key)
+            and not any(self._is_foot_geom(g) for g in key)
         )
         contact_gain = 1.0 + self.body_contact_gain * n_body_ground
         for key, phi in phis.items():
@@ -995,12 +1031,11 @@ class InteractionMeshRetargeter:
             # pull it into the floor, and rocks as the active contact set switches
             if self.ground_margin > 0:
                 names = (self._geom_names[key[0]], self._geom_names[key[1]])
-                if any("ground" in n for n in names) and not any("foot" in n for n in names):
+                if any("ground" in n for n in names) and not any(self._is_foot_geom(g) for g in key):
                     ground_soft.append(cp.square(cp.pos(self.ground_margin - (phi + Ja_n @ dqa))))
 
-        # Self-collision constraints: new_distance >= tolerance  =>  phi + J @ dqa >= tol. Exact-penalty
-        # slack (hard whenever reachable) since a pair can start overlapping while foot sticking or the
-        # trust region forbids the separating step, which makes the pure inequality infeasible.
+        # Self-collision: phi + J @ dqa >= tol, with an exact-penalty slack because a pair can start
+        # overlapping while foot sticking or the trust region forbids the separating step.
         Js_sc, phis_sc = self._compute_self_collision_constraints(frame_idx)
         sc_slacks, sc_soft = [], []
         for key, phi in phis_sc.items():
@@ -1029,10 +1064,9 @@ class InteractionMeshRetargeter:
         obj_terms = []
         term_labels = []
 
-        def _add_term(label, expr):  # noqa: ANN001, ANN202
+        def _add_term(label, expr):
             obj_terms.append(expr)
             term_labels.append(label)
-
 
         if use_lap:
             _add_term("laplacian", cp.sum_squares(cp.multiply(sqrt_w3, lap_var - target_lap_vec)))
@@ -1044,17 +1078,19 @@ class InteractionMeshRetargeter:
         if ground_soft:
             _add_term("ground_margin", self.ground_margin_weight * cp.sum(cp.hstack(ground_soft)))
 
-        # hcrl: FOOT STACKING CLEARANCE. When the feet overlap in plan the crossing foot must clear the
-        # stance foot vertically; the required gap ramps with the overlap, so the foot descends as it
-        # slides off instead of dropping when the contact constraint releases.
+        # Foot stacking: feet overlapping in plan keep a vertical gap that ramps with the overlap, so the
+        # crossing foot descends as it slides off instead of dropping when contact releases.
         if self.foot_stack_clearance > 0 and not init_t:
-            ids = [mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, self.task_constants.FOOT_LINKS[s]) for s in ("left", "right")]
+            ids = [
+                mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, self.task_constants.FOOT_LINKS[s])
+                for s in ("left", "right")
+            ]
             if min(ids) >= 0:
                 self.robot_data.qpos[:] = q
                 mujoco.mj_forward(self.robot_model, self.robot_data)
                 pl, pr = (self.robot_data.xpos[b].copy() for b in ids)
                 hi, lo_ = (0, 1) if pl[2] >= pr[2] else (1, 0)
-                # overlap in the LOWER foot's own frame: side-by-side feet (lateral offset beyond the
+                # overlap in the lower foot's own frame: side-by-side feet (lateral offset beyond the
                 # foot's half-width) do not overlap however close their centres are
                 R_lo = self.robot_data.xmat[ids[lo_]].reshape(3, 3)
                 rel = R_lo.T @ ((pl if hi == 0 else pr) - (pr if hi == 0 else pl))
@@ -1066,7 +1102,10 @@ class InteractionMeshRetargeter:
                     J_lo = self._calc_pos_jacobian(ids[lo_])[:, self.q_a_indices]
                     dz_now = float((pl if hi == 0 else pr)[2] - (pr if hi == 0 else pl)[2])
                     need = self.foot_stack_thickness + overlap * self.foot_stack_clearance
-                    _add_term("foot_stack", self.foot_stack_weight * cp.square(cp.pos(need - (dz_now + (J_hi[2] - J_lo[2]) @ dqa))))
+                    _add_term(
+                        "foot_stack",
+                        self.foot_stack_weight * cp.square(cp.pos(need - (dz_now + (J_hi[2] - J_lo[2]) @ dqa))),
+                    )
 
         # foot anchor pull (see foot-lock block): heavily weighted so stance feet land and stay planted
         if apply_foot_lock and foot_anchor_terms:
@@ -1106,7 +1145,7 @@ class InteractionMeshRetargeter:
         # additive root-orientation damping per body-ground contact: the lying-body rock is in the
         # root, and a route without absolute position terms cannot afford to slow every joint
         root_extra = self.body_contact_root * n_body_ground
-        if root_extra > 0 and not init_t:
+        if root_extra > 0 and not init_t and self.q_a_init_idx == -7:
             _add_term("root_contact_damp", root_extra * cp.sum_squares(dqa[3:7] - dqa_smooth[3:7]))
         if init_t:
             pass
@@ -1120,24 +1159,21 @@ class InteractionMeshRetargeter:
                 # if a full matrix was supplied, fall back to quad_form
                 _add_term("smooth_quad", cp.quad_form(dqa - dqa_smooth, Wsmooth))
 
-        # hcrl: JOINT-LIMIT BARRIER. The hard box above admits solutions pinned exactly AT a stop, and
-        # nothing costs that -- waist_pitch sits on its +0.52 stop in 54% of corpus frames. A pinned joint
-        # has zero control headroom downstream. This is a one-sided quadratic hinge that is exactly zero
-        # outside `margin` of a stop, so the interior of the range is undistorted.
+        # Joint-limit barrier: the hard box admits solutions pinned at a stop, with no control headroom
+        # left. The one-sided hinge is zero outside `margin` of a stop, so the range interior is undistorted.
         if self.joint_limit_barrier_weight > 0 and self.joint_limit_barrier_margin > 0:
             rows, m = self._barrier_rows_and_margins()
             if rows.size:
                 q_new = dqa[rows] + q_a_n_last[rows]
                 over = cp.pos(q_new - (self.q_a_ub[rows] - m))
                 under = cp.pos((self.q_a_lb[rows] + m) - q_new)
-                _add_term("joint_limit_barrier", 
-                    self.joint_limit_barrier_weight * (cp.sum_squares(over) + cp.sum_squares(under))
+                _add_term(
+                    "joint_limit_barrier",
+                    self.joint_limit_barrier_weight * (cp.sum_squares(over) + cp.sum_squares(under)),
                 )
 
-        # hcrl: SOLE-ORIENTATION MATCHING. Two mapped points per foot (an ankle and a toe) define a
-        # line, so the sole's pitch and roll cost the mesh objective nothing and it settles toe-down.
-        # Rotate the robot sole toward the source's own sole plane; the residual is projected off the
-        # normal so foot YAW stays free (the human's yaw is not a target).
+        # Sole orientation: the mapped ankle and toe leave the sole's pitch and roll free, so rotate the sole
+        # toward the source plane, with the residual projected off the normal to leave foot yaw free.
         if self.sole_normal_weight > 0 and self.sole_normal_seq is not None and not init_t:
             t = min(max(frame_idx, 0), len(self.sole_normal_seq) - 1)
             for k, side in enumerate(("left", "right")):
@@ -1157,32 +1193,25 @@ class InteractionMeshRetargeter:
                 Jr = self._calc_rot_jacobian(bid)[:, self.q_a_indices]
                 _add_term("sole_normal", self.sole_normal_weight * cp.sum_squares(keep_tilt @ (Jr @ dqa - error)))
 
-                # While the source sole is on the ground, put the robot's sole there too. The sole
-                # plane sits SOLE_OFFSET below the foot body, so the body's target height follows it.
-                # While the source sole is on the ground, put the robot's sole there too. Orientation
-                # alone LIFTS the foot: rotating a toe-down sole flat raises its lowest contact point.
+                # pull a planted source sole's robot sole down too, since flattening a toe-down sole lifts it
                 if self.sole_height_weight > 0 and self.sole_height_seq is not None:
                     target_height = float(self.sole_height_seq[t, k])
                     if target_height < self.sole_planted_height:
                         sole_now = min(self.robot_data.xpos[b][2] for b in self._sole_body_ids(side))
                         Jp = self._calc_pos_jacobian(bid)[:, self.q_a_indices]
-                        # One-sided: penalize HOVERING above the source's sole height, never being
-                        # below it. A symmetric pull settles at a compromise well above the floor,
-                        # and driving through the target relies on the non-penetration constraint
-                        # catching it -- which is what put feet through the ground. Here that
-                        # constraint is the floor and this term only ever pushes down onto it.
-                        _add_term("foot_approach", 
-                            self.sole_height_weight
-                            * cp.square(cp.pos(Jp[2] @ dqa + (sole_now - target_height)))
+                        # one-sided, so it only pushes down onto the floor that non-penetration holds
+                        _add_term(
+                            "foot_approach",
+                            self.sole_height_weight * cp.square(cp.pos(Jp[2] @ dqa + (sole_now - target_height))),
                         )
 
-        # hcrl: FOOT HEADING. Steer the foot body's forward axis (toward its toe sphere) to the source
-        # ankle->toe heading; yaw only, so it never fights the sole-normal term above.
+        # foot heading: steer the foot body's forward axis (toward its toe sphere) to the source ankle->toe
+        # heading, yaw only so it never fights the sole-normal term
         if self.foot_yaw_weight > 0 and self.foot_yaw_seq is not None and not init_t:
             t = min(max(frame_idx, 0), len(self.foot_yaw_seq) - 1)
             for k, side in enumerate(("left", "right")):
-                bid = mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, self.task_constants.FOOT_LINKS[side])
-                toe = mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, f"{side}_foot_sphere_5_link")
+                bid = self._body_id(self.task_constants.FOOT_LINKS[side])
+                toe = self._body_id(self.task_constants.SOLE_LINKS[side][-1])
                 if bid < 0 or toe < 0:
                     continue
                 self._body_rot(q, bid)  # restores FK(q) for the Jacobian
@@ -1192,43 +1221,48 @@ class InteractionMeshRetargeter:
                 Jr = self._calc_rot_jacobian(bid)[:, self.q_a_indices]
                 _add_term("foot_yaw", self.foot_yaw_weight * cp.square(Jr[2] @ dqa - err))
 
-        # hcrl: ARM PLANE. The upper-arm twist is unobserved by positions alone (the elbow apex can point
-        # either way for one hand position); match the normal of the shoulder-elbow-wrist plane to the
-        # source's, linearized through the three keypoint Jacobians. Relative shape only, no joint target.
+        # Arm plane: the upper-arm twist is unobserved by positions, so match the shoulder-elbow-wrist plane
+        # normal to the source's (relative shape only, no joint target).
         if self.arm_plane_weight > 0 and human_src_pts is not None and self.arm_plane_triples:
-            for names in self.arm_plane_triples:
-                if not all(n in J_OC_dict for n in names):
+            for triple in self.arm_plane_triples:
+                if not all(n in J_OC_dict for n in triple):
                     continue
-                s_, e_, w_ = (p_OC_dict[n] for n in names)
-                Js_, Je_, Jw_ = (J_OC_dict[n] for n in names)
+                s_, e_, w_ = (p_OC_dict[n] for n in triple)
+                Js_, Je_, Jw_ = (J_OC_dict[n] for n in triple)
                 u, vv = e_ - s_, w_ - e_
                 n_now = np.cross(u, vv)
                 mag = float(np.linalg.norm(n_now))
                 if mag < 1e-4:
                     continue
-                i_s, i_e, i_w = (robot_link_keys.index(n) for n in names)
+                i_s, i_e, i_w = (robot_link_keys.index(n) for n in triple)
                 u_s, v_s = human_src_pts[i_e] - human_src_pts[i_s], human_src_pts[i_w] - human_src_pts[i_e]
                 n_src = np.cross(u_s, v_s)
                 sin_bend = float(np.linalg.norm(n_src) / (np.linalg.norm(u_s) * np.linalg.norm(v_s) + 1e-9))
-                # the plane is undefined for a straight arm; fade the term in between 15 and 35 deg of bend
-                gate = float(np.clip((sin_bend - np.sin(np.radians(15))) / (np.sin(np.radians(35)) - np.sin(np.radians(15))), 0.0, 1.0))
+                # the plane is undefined for a straight arm, so fade the term in between 15 and 35 deg of bend
+                gate = float(
+                    np.clip(
+                        (sin_bend - np.sin(np.radians(15))) / (np.sin(np.radians(35)) - np.sin(np.radians(15))),
+                        0.0,
+                        1.0,
+                    )
+                )
                 if gate <= 0.0:
                     continue
                 n_tgt = n_src / np.linalg.norm(n_src) * mag  # same bend magnitude, source direction
+
                 # d(u x v) = [u]x dv - [v]x du, with du = Je - Js, dv = Jw - Je (dqa)
                 def skew(a):
                     return np.array([[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]])
-                dn = skew(u) @ (Jw_ - Je_) - skew(vv) @ (Je_ - Js_)
-                # normalize by the segment lengths, not |n|: dividing by a near-zero normal made the
-                # term's curvature explode at small bends and the elbow flickered straight/bent
-                scale = float(np.linalg.norm(u) * np.linalg.norm(vv) + 1e-9)
-                _add_term("arm_plane", gate * self.arm_plane_weight * cp.sum_squares((dn @ dqa + (n_now - n_tgt)) / scale))
 
-        # hcrl: BALL CLEARANCE. The human is scaled to robot size but the ball is not, so a contact
-        # that was tangent for the human lands (1 - scale) * radius inside it -- 33 mm for the T1.
-        # Each foot is held at the clearance the HUMAN's own foot had, which is an absolute distance
-        # to an object that never shrank. One-sided: the ball track is registered to the mocap only
-        # to within a few cm, so pushing a foot out is safe, pulling it in would chase that noise.
+                dn = skew(u) @ (Jw_ - Je_) - skew(vv) @ (Je_ - Js_)
+                # normalize by segment lengths, not |n|, which nears zero at small bends and blows up the curvature
+                scale = float(np.linalg.norm(u) * np.linalg.norm(vv) + 1e-9)
+                _add_term(
+                    "arm_plane", gate * self.arm_plane_weight * cp.sum_squares((dn @ dqa + (n_now - n_tgt)) / scale)
+                )
+
+        # Ball clearance: each foot keeps the human's own clearance from the unscaled ball, one-sided because
+        # the ball track is registered to the mocap only to within a few cm.
         if self.ball_weight > 0 and self.ball_seq is not None and not init_t:
             t = min(max(frame_idx, 0), len(self.ball_seq) - 1)
             centre = np.asarray(self.ball_seq[t], dtype=np.float64)
@@ -1241,6 +1275,7 @@ class InteractionMeshRetargeter:
                     continue
                 rot = self._body_rot(q, bid)
                 origin = self.robot_data.xpos[bid].astype(np.float64)
+                assert self.ball_foot_points is not None, "ball_seq is set without ball_foot_points"
                 points = origin + self.ball_foot_points[side] @ rot.T
                 offset = points - centre
                 dist = np.maximum(np.linalg.norm(offset, axis=1), 1e-9)
@@ -1256,38 +1291,23 @@ class InteractionMeshRetargeter:
                 rows = np.stack(
                     [offset[i] / dist[i] @ self._point_jacobian(Jp, Jr, points[i] - origin) for i in deepest]
                 )
-                obj_terms.append(
-                    self.ball_weight * cp.sum_squares(cp.pos(-(rows @ dqa + (dist[deepest] - keep_out))))
+                _add_term(
+                    "ball_clearance",
+                    self.ball_weight * cp.sum_squares(cp.pos(-(rows @ dqa + (dist[deepest] - keep_out)))),
                 )
 
-        # hcrl: PELVIS-TRACKING PRIOR. The interaction mesh is a DIFFERENTIAL (Laplacian) objective, so the
-        # absolute root pose is in its null space: the solver is free to lean the pelvis back and cancel it
-        # with waist pitch (measured corr -0.58, torso net upright). Anchoring the pelvis to the source
-        # removes that null space at its origin -- it is the primary fix for the waist saturation, and the
-        # barrier above is the guard.
+        # Pelvis prior: the Laplacian objective leaves the absolute root pose in its null space, so the solver
+        # could lean the pelvis back and cancel it with waist pitch. Anchoring the pelvis removes that freedom.
         if self.pelvis_track_weight > 0 and human_src_pts is not None:
             k = robot_link_keys[self._pelvis_kp]
-            _add_term("pelvis_track", 
+            _add_term(
+                "pelvis_track",
                 self.pelvis_track_weight
-                * cp.sum_squares(J_OC_dict[k] @ dqa - (human_src_pts[self._pelvis_kp] - p_OC_dict[k]))
+                * cp.sum_squares(J_OC_dict[k] @ dqa - (human_src_pts[self._pelvis_kp] - p_OC_dict[k])),
             )
 
-        # hcrl: ROOT ANGULAR-RATE PRIOR. The source gives only joint POSITIONS, so torso orientation is
-        # inferred from a handful of points and comes out noisier than the motion it came from (measured
-        # 1.45x the source's per-frame rotation). Matching the source's rotation RATE -- not its absolute
-        # orientation, whose rest pose differs from the robot's -- removes that jitter.
-        if self.root_rate_weight > 0 and self.root_quat_track is not None and not init_t:
-            _t = min(max(frame_idx, 1), len(self.root_quat_track) - 1)
-            _q0, _q1 = self.root_quat_track[_t - 1], self.root_quat_track[_t]
-            if float(np.dot(_q0, _q1)) < 0.0:  # quaternion double cover
-                _q1 = -_q1
-            _dq_src = _q1 - _q0
-            _add_term("root_rate", self.root_rate_weight * cp.sum_squares(dqa[3:7] - _dq_src))
-
-        # hcrl: JOINT-ANGLE TRACKING. Everything else in this objective matches keypoint POSITIONS. On a
-        # robot whose proportions differ from the human's, position matching necessarily distorts the joint
-        # ANGLES -- which for expressive motion (dance) carry the content, while an end-effector position
-        # does not. The 1-DOF hinges have an unambiguous anatomical angle in the source, so track it.
+        # Joint-angle tracking: position matching distorts joint angles when the proportions differ, and the
+        # 1-DOF hinges have an unambiguous source angle to track.
         if self.joint_angle_weight > 0 and self.joint_angle_targets:
             ja_terms = []
             for jname, track in self.joint_angle_targets.items():
@@ -1299,11 +1319,8 @@ class InteractionMeshRetargeter:
             if ja_terms:
                 _add_term("joint_angle", self.joint_angle_weight * cp.sum(cp.hstack(ja_terms)))
 
-        # hcrl: BALL-CONTACT RADIUS CONSTRAINT. During a detected contact segment the toe is held at a
-        # constant distance r0 from the (splined) ball center: a target-level hold cannot beat the ~50 mm
-        # tracking residual, so this is a HARD constraint like foot sticking, linearized along the current
-        # radial direction u -- |u . (p + J dqa - ball)| within r0 +- tol. Radial only, so the foot may
-        # roll around the ball surface, which is what dribbling contact does.
+        # Ball-contact radius: during a detected contact the toe is held at its entry distance r0 from the
+        # ball centre, radially only so the foot can roll around the ball surface.
         if self.ball_track is not None and not init_t:
             _bt = min(frame_idx, len(self.ball_track) - 1)
             _finite = bool(np.isfinite(self.ball_track[_bt]).all())  # NaN centre = track dropout
@@ -1325,10 +1342,8 @@ class InteractionMeshRetargeter:
                 ]
                 _add_term("ball_contact_slack", 500.0 * _sl)
 
-        # hcrl: KEYPOINT POSITION TRACKING. The mesh term matches the Laplacian -- relative shape -- and
-        # the only ABSOLUTE position priors were the pelvis and the arm, so hips/knees/ankles/feet had
-        # nothing pinning them to their targets and settled 50-85 mm away. Sweeping solver iterations and
-        # step size changed the residual by 0.1 mm, so this is the cost's optimum, not under-convergence.
+        # Keypoint tracking: the mesh term matches relative shape only, so without an absolute prior the
+        # hips, knees, ankles and feet settle away from their targets.
         if self.keypoint_track_weight > 0 and human_src_pts is not None:
             kp_terms = [
                 cp.sum_squares(J_OC_dict[robot_link_keys[i]] @ dqa - (human_src_pts[i] - p_OC_dict[robot_link_keys[i]]))
@@ -1336,10 +1351,8 @@ class InteractionMeshRetargeter:
             ]
             _add_term("keypoint_track", self.keypoint_track_weight * cp.sum(cp.hstack(kp_terms)))
 
-        # hcrl: ARM REGULARIZER. Arms carry no contact in most clips, so the mesh leaves them
-        # under-determined and the solver parks them in whatever pose the null space lands on (the
-        # "awkward arm" defect -- same redundancy class as the waist, not a joint-limit problem: the
-        # elbow saturates in only 0.02% of frames). Pull all 6 arm keypoints toward the source.
+        # Arm prior: arms rarely carry contact, so the mesh leaves them under-determined and the solver
+        # parks them wherever the null space lands.
         if self.arm_reg_weight > 0 and human_src_pts is not None:
             arm_terms = [
                 cp.sum_squares(J_OC_dict[robot_link_keys[i]] @ dqa - (human_src_pts[i] - p_OC_dict[robot_link_keys[i]]))
@@ -1347,24 +1360,19 @@ class InteractionMeshRetargeter:
             ]
             _add_term("arm_reg", self.arm_reg_weight * cp.sum(cp.hstack(arm_terms)))
 
-        # hcrl: NEUTRAL-ANKLE PRIOR IN FREE SWING. Ankle pitch/roll are unconstrained mid-swing and drift
-        # onto their stops (roll is pinned in 35% of `edge` frames), so the foot lands pointed/inverted.
-        # Gated strictly OFF through the approach ramp and the engagement window, so it can never fight the
-        # attitude the foot settles into on contact -- that target was tried and measured to hurt
-        # (see _foot_orient_damp), and this prior deliberately does not reintroduce one.
+        # Neutral-ankle prior: ankle pitch/roll drift onto their stops in free swing. It is off through the
+        # approach ramp and engagement window, so it never fights the attitude the foot settles into.
         if self.swing_ankle_weight > 0 and apply_foot_lock and not init_t:
             for side in ("left", "right"):
-                key = f"{side}_ankle_roll_link"
+                key = self.task_constants.FOOT_LINKS[side]
                 free_swing = (
-                    not self._is_foot_locked_in_window(key, frame_idx)
+                    self._is_foot_locked_in_window(key, frame_idx) is None
                     and self._foot_orient_damp(side, frame_idx) <= 0.0
                     and self._foot_approach_anchor(key, frame_idx)[1] is None
                 )
                 rows_a = self._ankle_rows[side]
                 if free_swing and rows_a.size:
-                    _add_term("swing_ankle", 
-                        self.swing_ankle_weight * cp.sum_squares(dqa[rows_a] + q_a_n_last[rows_a])
-                    )
+                    _add_term("swing_ankle", self.swing_ankle_weight * cp.sum_squares(dqa[rows_a] + q_a_n_last[rows_a]))
 
         problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints)
 
@@ -1376,8 +1384,8 @@ class InteractionMeshRetargeter:
             problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints)
             problem.solve(solver=cp.CLARABEL, **solver_kwargs)
 
-        # a foot still deep in the floor after the init frame must escape faster than the guard allows;
-        # yield the guard for this iteration rather than abort (never reached when the QP is feasible)
+        # a foot still deep in the floor after the init frame must escape faster than the guard allows, so
+        # drop the guard for this iteration rather than abort
         if (problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE)) and guard_constraints:
             guard_ids = {id(c) for c in guard_constraints}
             problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), [c for c in constraints if id(c) not in guard_ids])
@@ -1386,7 +1394,7 @@ class InteractionMeshRetargeter:
                 print(f"[teleport-guard] frame {frame_idx}: infeasible with the foot step cap, solved without it")
 
         if problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
-            # hcrl debug: report which hard constraints are already violated at dqa = 0
+            # report which hard constraints are already violated at dqa = 0
             print(f"[infeasible-debug] frame {frame_idx}: step_size={self.step_size}")
             for key, phi in phis.items():
                 if phi < 0.05:
@@ -1403,8 +1411,11 @@ class InteractionMeshRetargeter:
             vals = [(lab, float(t.value)) for lab, t in zip(term_labels, obj_terms)]
             tot = sum(v for _, v in vals) or 1.0
             top = sorted(vals, key=lambda kv: -kv[1])
-            print(f"[terms] frame {frame_idx} total={tot:.3f}: "
-                  + "  ".join(f"{k}={v:.3f}({100 * v / tot:.0f}%)" for k, v in top if v > 1e-4), flush=True)
+            print(
+                f"[terms] frame {frame_idx} total={tot:.3f}: "
+                + "  ".join(f"{k}={v:.3f}({100 * v / tot:.0f}%)" for k, v in top if v > 1e-4),
+                flush=True,
+            )
 
         q_star = np.copy(q)
         q_star[self.q_a_indices] = dqa_star + q_a_n_last
@@ -1413,12 +1424,16 @@ class InteractionMeshRetargeter:
         return q_star, cost
 
     def _foot_orient_damp(self, side: str, frame_idx: int) -> float:
-        """Engagement-phase angular-rate damping weight in [0, 1]: cosine ramp-in over the last 3
-        swing frames BEFORE a window (descent toe-down rotation finishes before contact, not after),
-        full for the first 4 stance frames (the constraint-activation snap), cosine fade to 0 by
-        frame 9. No attitude TARGET exists -- flat and source-implied targets both measurably fight
-        the attitude the G1's own geometry settles into (longer foot than the scaled human); damping
-        only limits the RATE of reaching it. Mid/late stance and the rest of swing are untouched."""
+        """Foot angular-rate damping weight while a stance window engages.
+
+        Args:
+            side: ``left`` or ``right``.
+            frame_idx: Solver frame.
+
+        Returns:
+            Weight in [0, 1]: ramping in over the 3 swing frames before a window, 1 for its first 4 frames,
+            fading to 0 by frame 9, and 0 elsewhere.
+        """
         for w in self._foot_lock_windows.get(side, ()):
             start, end = w[0], w[1]
             if start - 3 <= frame_idx < start:
@@ -1429,10 +1444,16 @@ class InteractionMeshRetargeter:
         return 0.0
 
     def _foot_approach_anchor(self, foot_link_key: str, frame_idx: int) -> tuple[float, tuple | None]:
-        """(cosine ramp in [0, 1], anchor xyz) over the last 4 swing frames before a stance window:
-        anticipatory approach shaping so the foot ARRIVES at its known anchor and the post-contact
-        settle ~ 0 (descents land toe-first with 3-4 cm arrival error otherwise). The ramp is tiny 4
-        frames out and ~0.9 the frame before contact -- it bends only the final approach, not the arc."""
+        """Approach weight and anchor for the last 4 swing frames before a stance window.
+
+        Args:
+            foot_link_key: Foot link name, whose ``left``/``right`` substring picks the side.
+            frame_idx: Solver frame.
+
+        Returns:
+            ``(weight, anchor xyz)``, the weight a cosine ramp reaching 1 the frame before contact, or
+            ``(0.0, None)`` outside an approach.
+        """
         key_lower = foot_link_key.lower()
         side = "left" if "left" in key_lower else ("right" if "right" in key_lower else None)
         if side is None:
@@ -1445,19 +1466,80 @@ class InteractionMeshRetargeter:
         return 0.0, None
 
     def _body_rot(self, q: np.ndarray, body_id: int) -> np.ndarray:
-        """World rotation matrix of a body at configuration q (leaves robot_data at q's FK)."""
+        """World rotation of a body at configuration ``q``, leaving ``robot_data`` at q's FK.
+
+        Args:
+            q: Full robot configuration.
+            body_id: Mujoco body id.
+
+        Returns:
+            Rotation matrix, shape (3, 3).
+        """
         self.robot_data.qpos[:] = q
         mujoco.mj_forward(self.robot_model, self.robot_data)
         return self.robot_data.xmat[body_id].reshape(3, 3).copy()
 
     def _sole_body_ids(self, side: str) -> list[int]:
-        """Body ids of one foot's sole spheres, resolved once the robot model exists."""
+        """Body ids of one foot's sole spheres, resolved on first use.
+
+        Args:
+            side: ``left`` or ``right``.
+
+        Returns:
+            Body ids in ``SOLE_LINKS`` order.
+        """
         if side not in self._sole_body_id_cache:
             self._sole_body_id_cache[side] = [
                 mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, name)
                 for name in self.task_constants.SOLE_LINKS[side]
             ]
         return self._sole_body_id_cache[side]
+
+    def _body_id(self, name: str) -> int:
+        """Look up a body id by name.
+
+        Args:
+            name: Body name.
+
+        Returns:
+            The body id, or -1 when the robot has no such body.
+        """
+        return mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, name)
+
+    def _warn_inert_terms(self) -> None:
+        """Log each positive-weight term whose bodies, keypoints or joints this robot and source lack."""
+        links = self.task_constants.SOLE_LINKS
+        feet_missing = any(self._body_id(n) < 0 for n in self.task_constants.FOOT_LINKS.values())
+        soles_missing = any(self._body_id(n) < 0 for side in links.values() for n in side)
+        unresolved_hinges = [n for n in (self.joint_angle_targets or {}) if not len(self._resolve_joint_rows((n,)))]
+        inert = {
+            "foot_yaw": self.foot_yaw_weight > 0 and (feet_missing or soles_missing),
+            "foot_orient": self.foot_orient_weight > 0 and feet_missing,
+            "sole_normal": self.sole_normal_weight > 0 and (feet_missing or soles_missing),
+            "sole_height": self.sole_height_weight > 0 and (feet_missing or soles_missing),
+            "arm_reg": self.arm_reg_weight > 0 and not self._arm_kps,
+            "swing_ankle": self.swing_ankle_weight > 0 and any(not len(r) for r in self._ankle_rows.values()),
+            "joint_angle": self.joint_angle_weight > 0 and bool(unresolved_hinges),
+        }
+        for term, is_inert in inert.items():
+            if is_inert:
+                logger.warning("%s has a positive weight but resolves to nothing on this robot and source", term)
+
+    def _is_foot_geom(self, geom_id: int) -> bool:
+        """Check whether a geom belongs to a foot body or one of its sole spheres.
+
+        Args:
+            geom_id: Mujoco geom id.
+
+        Returns:
+            True for a foot geom.
+        """
+        if self._foot_geoms is None:
+            links = self.task_constants.SOLE_LINKS
+            names = {*self.task_constants.FOOT_LINKS.values(), *(n for side in links.values() for n in side)}
+            bodies = [b for b in (self._body_id(n) for n in names) if b >= 0]
+            self._foot_geoms = frozenset(np.flatnonzero(np.isin(self.robot_model.geom_bodyid, bodies)).tolist())
+        return geom_id in self._foot_geoms
 
     @staticmethod
     def _point_jacobian(jac_pos: np.ndarray, jac_rot: np.ndarray, arm: np.ndarray) -> np.ndarray:
@@ -1475,7 +1557,14 @@ class InteractionMeshRetargeter:
         return jac_pos - skew @ jac_rot
 
     def _calc_pos_jacobian(self, body_id: int) -> np.ndarray:
-        """Positional Jacobian (3 x nq) at the CURRENT robot_data FK state: v_world = Jp @ qdot."""
+        """Positional Jacobian of a body origin at the current ``robot_data`` FK state.
+
+        Args:
+            body_id: Mujoco body id.
+
+        Returns:
+            ``Jp`` of shape (3, nq), with ``v_world = Jp @ qdot``.
+        """
         Jp = np.zeros((3, self.robot_model.nv), dtype=np.float64, order="C")
         Jr = np.zeros((3, self.robot_model.nv), dtype=np.float64, order="C")
         p = self.robot_data.xpos[body_id].astype(np.float64).reshape(3, 1)
@@ -1483,7 +1572,14 @@ class InteractionMeshRetargeter:
         return Jp @ self._build_transform_qdot_to_qvel_fast()
 
     def _calc_rot_jacobian(self, body_id: int) -> np.ndarray:
-        """Rotational Jacobian (3 x nq) at the CURRENT robot_data FK state: w_world = Jr @ qdot."""
+        """Rotational Jacobian of a body at the current ``robot_data`` FK state.
+
+        Args:
+            body_id: Mujoco body id.
+
+        Returns:
+            ``Jr`` of shape (3, nq), with ``w_world = Jr @ qdot``.
+        """
         Jp = np.zeros((3, self.robot_model.nv), dtype=np.float64, order="C")
         Jr = np.zeros((3, self.robot_model.nv), dtype=np.float64, order="C")
         p = self.robot_data.xpos[body_id].astype(np.float64).reshape(3, 1)
@@ -1491,30 +1587,36 @@ class InteractionMeshRetargeter:
         return Jr @ self._build_transform_qdot_to_qvel_fast()
 
     def _foot_step_cap(self, frame_idx: int, foot_link_key: str) -> float:
-        """Backtrack-level toe step cap for this frame/foot: 0.075 default ~= natural swing peak;
-        a per-clip (T, 2) override raises it through real flight phases (jumps) so the cap cannot
-        flatten the motion, while stance-adjacent frames keep the tight default."""
+        """Toe step cap for one foot at one frame.
+
+        Args:
+            frame_idx: Solver frame.
+            foot_link_key: Foot link name, whose ``right`` substring picks the side.
+
+        Returns:
+            The per-clip ``foot_step_max_seq`` entry, or 0.075 m (about a natural swing peak) without one.
+        """
         if self.foot_step_max_seq is None:
             return 0.075
         k = 1 if "right" in foot_link_key.lower() else 0
         t = min(max(frame_idx, 0), len(self.foot_step_max_seq) - 1)
         return float(self.foot_step_max_seq[t, k])
 
-    def _is_foot_locked_in_window(self, foot_link_key: str, frame_idx: int) -> bool:
-        """Check whether a foot link is locked by configured frame windows."""
-        key_lower = foot_link_key.lower()
-        side = None
-        if "left" in key_lower:
-            side = "left"
-        elif "right" in key_lower:
-            side = "right"
-        if side is None:
-            return False
-
-        return any(w[0] <= frame_idx <= w[1] for w in self._foot_lock_windows.get(side, ()))
+    def _is_foot_locked_in_window(self, foot_link_key: str, frame_idx: int) -> float | None:
+        """Return z_floor if foot is locked at this frame, else None."""
+        anchor = self._foot_lock_anchor(foot_link_key, frame_idx)
+        return None if anchor is None else anchor[2]
 
     def _foot_lock_anchor(self, foot_link_key: str, frame_idx: int) -> tuple | None:
-        """(x|None, y|None, z) anchor for a locked foot at this frame (z falls back to the global floor)."""
+        """Anchor of a locked foot at one frame.
+
+        Args:
+            foot_link_key: Foot link name, whose ``left``/``right`` substring picks the side.
+            frame_idx: Solver frame.
+
+        Returns:
+            ``(x | None, y | None, z)`` with z falling back to the global floor, or None when unlocked.
+        """
         key_lower = foot_link_key.lower()
         side = "left" if "left" in key_lower else ("right" if "right" in key_lower else None)
         if side is None:
@@ -1619,14 +1721,19 @@ class InteractionMeshRetargeter:
                 break
             last_cost = cost
 
-        # HARD teleport guarantee on the FINAL pose: the in-QP velocity cap bounds the LINEARIZED step,
-        # and linearization error across SQP iterations lets the true step overshoot. Backtrack the
-        # whole frame update (nonlinear FK check) until no toe moves more than FOOT_STEP_MAX from the
-        # previous frame -- physically impossible foot motion cannot leave this function.
+        # The in-QP cap bounds only the linearized step, so backtrack the whole frame update until no toe
+        # moves more than its cap from the previous frame (nonlinear FK check).
         if self.teleport_guard and not init_t:
 
             def _step_excess(q_test: np.ndarray) -> float:
-                """Max (toe step - per-foot cap); > 0 means some toe exceeds its cap."""
+                """Largest toe step beyond its cap.
+
+                Args:
+                    q_test: Candidate configuration.
+
+                Returns:
+                    Max over toes of (step - cap), positive when some toe exceeds its cap.
+                """
                 _, p_now, _ = self._calc_manipulator_jacobians(q_test, links=self.foot_links, obj_frame=False)
                 _, p_prev, _ = self._calc_manipulator_jacobians(q_t_last, links=self.foot_links, obj_frame=False)
                 ex = [
