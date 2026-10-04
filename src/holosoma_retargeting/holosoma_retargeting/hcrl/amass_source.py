@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Iterator
+from collections.abc import Callable
 from pathlib import Path
 
 import joblib
@@ -240,18 +240,22 @@ def convert_clip(
     return meta
 
 
-def iter_clips(root: Path) -> Iterator[tuple[str, dict]]:
-    """Yield ``(name, raw)`` for every sequence under ``root``.
+def _load_npz(path: Path) -> dict:
+    """One AMASS sequence as a plain dict, its file closed again."""
+    with np.load(path, allow_pickle=True) as raw:
+        return dict(raw)
+
+
+def iter_clips(root: Path) -> list[tuple[str, Callable[[], dict]]]:
+    """``(name, load)`` for every sequence under ``root``; ``load()`` reads that sequence.
 
     Handles both corpus shapes: an AMASS tree of per-sequence ``.npz`` (the dataset/subject/sequence
     path becomes the name), or an OMOMO ``.p`` joblib dict of sequences keyed by index.
     """
     if root.is_file():
-        for seq in joblib.load(root).values():
-            yield str(seq["seq_name"]), seq
-        return
-    for path in sorted(p for p in root.rglob("*.npz") if not p.name.startswith("shape")):
-        yield "_".join(path.relative_to(root).with_suffix("").parts), np.load(path, allow_pickle=True)
+        return [(str(seq["seq_name"]), lambda seq=seq: seq) for seq in joblib.load(root).values()]
+    paths = sorted(p for p in root.rglob("*.npz") if not p.name.startswith("shape"))
+    return [("_".join(p.relative_to(root).with_suffix("").parts), lambda p=p: _load_npz(p)) for p in paths]
 
 
 def _vote_sample(raw: dict) -> tuple | None:
@@ -302,26 +306,28 @@ def main() -> None:
     models = load_models(args.smpl_model_dir)
     soles = {gender: sole_vertices(model) for gender, model in models.items()}
     print(f"[amass] body models: {sorted(models)}")
-    clips = list(iter_clips(args.clip_root))
+    clips = iter_clips(args.clip_root)
     print(f"[amass] {len(clips)} clips found")
 
     if args.up_axis == "auto":
         stride = max(1, len(clips) // 64)
-        samples = [t for _, raw in clips[::stride][:64] if (t := _vote_sample(raw)) is not None]
+        samples = [t for _, load in clips[::stride][:64] if (t := _vote_sample(load())) is not None]
         axis, agreement = corpus_up_axis(models, samples)
         print(f"[amass] corpus up-axis: {'xyz'[axis]} ({agreement:.0%} of {len(samples)} sampled clips)")
     else:
         axis, agreement = ("xyz".index(args.up_axis), 1.0)
         print(f"[amass] corpus up-axis: {args.up_axis} (forced)")
-    rotate = axis != 2
+    if axis == 0:
+        raise ValueError("the corpus votes x-up, which no conversion here handles; pass --up-axis y or z")
+    rotate = axis == 1
 
     written, skipped, rates = [], 0, {}
-    for name, raw in clips:
+    for name, load in clips:
         try:
             meta = convert_clip(
                 models,
                 soles,
-                raw,
+                load(),
                 args.out_dir,
                 args.fps,
                 name,
