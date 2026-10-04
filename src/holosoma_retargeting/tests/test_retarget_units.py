@@ -1,4 +1,4 @@
-"""CPU tests for the hcrl source adapters and solver configuration (no solve, no rendering)."""
+"""CPU tests for the source adapters and solver configuration (no solve, no rendering)."""
 
 from __future__ import annotations
 
@@ -11,9 +11,10 @@ import pytest
 from holosoma_retargeting.config_types.data_type import DEMO_JOINTS_REGISTRY, G1FK_DEMO_JOINTS, TOE_NAMES_BY_FORMAT
 from holosoma_retargeting.config_types.robot import RobotConfig
 from holosoma_retargeting.config_types.terms import SolverTerms, preset_terms
-from holosoma_retargeting.hcrl import amass_source, smpl_fk, stance_windows
-from holosoma_retargeting.hcrl.limb_retarget import rescale_to_robot_limbs
-from holosoma_retargeting.hcrl.source_angles import t1_joint_angle_targets
+from holosoma_retargeting.data_utils import amass_source, smpl_fk
+from holosoma_retargeting.src import stance_windows
+from holosoma_retargeting.src.limb_retarget import rescale_to_robot_limbs
+from holosoma_retargeting.src.source_angles import t1_joint_angle_targets
 
 T1_MODEL = Path(__file__).resolve().parents[1] / "holosoma_retargeting" / "models" / "t1" / "t1_23dof.xml"
 
@@ -31,8 +32,8 @@ def test_to_z_up_is_a_rotation_taking_y_up_to_z_up():
 
 def test_resample_picks_nearest_frames():
     values = np.arange(10.0)
-    assert amass_source._resample(values, 30.0, 30.0) is values
-    np.testing.assert_array_equal(amass_source._resample(values, 60.0, 30.0), [0, 2, 4, 6, 8])
+    assert amass_source.resample(values, 30.0, 30.0) is values
+    np.testing.assert_array_equal(amass_source.resample(values, 60.0, 30.0), [0, 2, 4, 6, 8])
 
 
 @pytest.mark.parametrize("key", amass_source.FRAME_RATE_KEYS)

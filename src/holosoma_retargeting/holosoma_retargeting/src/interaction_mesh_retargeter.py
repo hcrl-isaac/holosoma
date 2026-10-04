@@ -540,7 +540,7 @@ class InteractionMeshRetargeter:
             return human_joint_motions - np.array([0.0, 0.0, offset])
         import mujoco as mj
 
-        from holosoma_retargeting.hcrl.limb_retarget import rescale_to_robot_limbs, robot_segment_lengths
+        from holosoma_retargeting.src.limb_retarget import rescale_to_robot_limbs, robot_segment_lengths
 
         if getattr(self, "_limb_cache", None) is None:
             parent, length, rigid = robot_segment_lengths(

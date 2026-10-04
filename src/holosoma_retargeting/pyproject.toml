@@ -38,6 +38,8 @@ dependencies = [
     "clarabel==0.11.1",
     "libigl",
     "tyro",
+    "joblib",
+    "pandas",
 ]
 
 [project.optional-dependencies]
@@ -68,7 +70,7 @@ source-include = [
     "holosoma_retargeting/**/*.pkl",
     "holosoma_retargeting/**/*.md",
 ]
-# OMOMO object models that hcrl/make_omomo_objects.py derives from the downloaded dataset into models/;
+# OMOMO object models that data_utils/make_omomo_objects.py derives from the downloaded dataset into models/;
 # they sit beside the bundled ones but are not part of the package
 source-exclude = [
     "holosoma_retargeting/models/clothesstand/**",

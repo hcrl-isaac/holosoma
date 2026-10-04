@@ -14,7 +14,7 @@ import pathlib
 import joblib
 import numpy as np
 
-from holosoma_retargeting.hcrl.amass_source import _resample
+from holosoma_retargeting.data_utils.amass_source import resample
 
 # per-frame arrays of a converted clip, all cut to the object track's length
 PER_FRAME_KEYS = ("global_joint_positions", "sole_normal", "sole_height")
@@ -80,7 +80,7 @@ def main() -> None:
             trans[:, 2] -= float(meta["ground"])  # same shift the joints got
             quat = rotmat_to_quat(np.asarray(seq["obj_rot"]).astype(np.float64))
             # the same nearest-frame resample the joints got, so frame i of both is the same instant
-            poses = _resample(np.concatenate([quat, trans], axis=1), float(meta["source_fps"]), float(meta["fps"]))
+            poses = resample(np.concatenate([quat, trans], axis=1), float(meta["source_fps"]), float(meta["fps"]))
             n = min(len(poses), len(d["global_joint_positions"]))
             for key in PER_FRAME_KEYS:
                 if key in d:

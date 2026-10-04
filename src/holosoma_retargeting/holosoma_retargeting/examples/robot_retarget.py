@@ -33,11 +33,11 @@ from holosoma_retargeting.config_types.retargeting import RetargetingConfig  # n
 from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
 from holosoma_retargeting.config_types.task import TaskConfig  # noqa: E402
 from holosoma_retargeting.config_types.terms import SolverTerms, preset_terms  # noqa: E402
-from holosoma_retargeting.hcrl import ball_contact  # noqa: E402
-from holosoma_retargeting.hcrl.source_angles import t1_joint_angle_targets  # noqa: E402
+from holosoma_retargeting.src import ball_contact  # noqa: E402
 from holosoma_retargeting.src.interaction_mesh_retargeter import (  # noqa: E402
     InteractionMeshRetargeter,  # type: ignore[import-not-found]
 )
+from holosoma_retargeting.src.source_angles import t1_joint_angle_targets  # noqa: E402
 from holosoma_retargeting.src.utils import (  # noqa: E402
     augment_object_poses,
     calculate_scale_factor,
@@ -273,7 +273,7 @@ def load_motion_data(
         pt_path = data_path / f"{task_name}.pt"
         if npz_path.exists():
             # OMOMO: the source npz carries the object pose track alongside the human joints, already in
-            # the same frame (see hcrl/omomo_objects.py).
+            # the same frame (see data_utils/omomo_objects.py).
             human_data = np.load(str(npz_path), allow_pickle=True)
             human_joints = human_data["global_joint_positions"]
             object_poses = human_data["object_poses"]
@@ -723,7 +723,7 @@ def main(cfg: RetargetingConfig) -> None:
     retargeter_kwargs = build_retargeter_kwargs_from_config(
         cfg.retargeter, constants, object_urdf_path, task_type, terms
     )
-    # per-window foot z-lock from precomputed stance windows (hcrl/stance_windows.py), since xy sticking
+    # per-window foot z-lock from precomputed stance windows (src/stance_windows.py), since xy sticking
     # alone never pulls a hovering source foot down to the surface
     _stick_path = data_path / task_name / f"{task_name}_foot_sticking.npz" if task_type == "climbing" else None
     if _stick_path is not None and _stick_path.exists():
@@ -916,7 +916,7 @@ def main(cfg: RetargetingConfig) -> None:
     retargeter.arm_reg_weight = terms.arm_weight
     retargeter.swing_ankle_weight = terms.swing_ankle_weight
     logger.info(
-        "hcrl priors: jl_w=%.1f margin=%.3f/%.2f pelvis=%.1f arm=%.1f swing_ankle=%.2f",
+        "Redundancy priors: jl_w=%.1f margin=%.3f/%.2f pelvis=%.1f arm=%.1f swing_ankle=%.2f",
         retargeter.joint_limit_barrier_weight,
         retargeter.joint_limit_barrier_margin,
         retargeter.joint_limit_barrier_margin_frac,
@@ -1125,7 +1125,7 @@ def main(cfg: RetargetingConfig) -> None:
                 "Ball clearance: weight %.0f, radius %.3f m, source clearance %s, %.0f%% of frames tracked",
                 retargeter.ball_weight,
                 retargeter.ball_radius,
-                "yes" if ball_gap is not None else "MISSING (non-penetration only)",
+                "yes" if ball_gap is not None else "missing (non-penetration only)",
                 100 * float(tracked.mean()),
             )
             # optionally hold the entry distance through each detected dribble contact with a hard radial

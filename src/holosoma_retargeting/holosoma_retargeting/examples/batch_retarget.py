@@ -28,9 +28,10 @@ import numpy as np
 import pandas as pd
 
 from holosoma_retargeting.config_types.data_type import TOE_NAMES_BY_FORMAT
-from holosoma_retargeting.hcrl import courts_to_scene, stance_windows
-from holosoma_retargeting.hcrl.csv_to_g1fk import DEFAULT_MODEL, fk_positions, qpos_row
-from holosoma_retargeting.hcrl.qpos_to_csv import qpos_to_csv
+from holosoma_retargeting.data_conversion.qpos_to_csv import qpos_to_csv
+from holosoma_retargeting.data_utils import courts_to_scene
+from holosoma_retargeting.data_utils.csv_to_g1fk import DEFAULT_MODEL, fk_positions, qpos_row
+from holosoma_retargeting.src import stance_windows
 
 PKG = Path(__file__).resolve().parents[1]
 
@@ -178,7 +179,8 @@ def main() -> None:
         rec = {"stem": stem, "court": court_name, "rc": rc, "cost": cost, "support": None, "max_air_s": None, "out": ""}
         npz = save_dir / f"{stem}_original.npz"
         if rc == 0 and npz.exists():
-            q = np.load(npz, allow_pickle=True)["qpos"]
+            with np.load(npz, allow_pickle=True) as result:
+                q = result["qpos"]
             boxes = np.array([[*p["pos"], *p["size"]] for p in courts[court_name]["prims"]], dtype=np.float64)
             rec["support"], rec["max_air_s"] = support_coverage(q, boxes, model)
             if columns is None:

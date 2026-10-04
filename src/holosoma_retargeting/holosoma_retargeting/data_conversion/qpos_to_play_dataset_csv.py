@@ -62,7 +62,8 @@ def main() -> None:
     stems = args.clips.read_text().split() if args.clips else [p.stem for p in sorted(args.retarget_dir.glob("*.npz"))]
     header = ",".join(["x", "y", "z", "qx", "qy", "qz", "qw"] + names)
     for stem in stems:
-        qpos = np.load(args.retarget_dir / f"{stem}.npz")["qpos"]
+        with np.load(args.retarget_dir / f"{stem}.npz") as result:
+            qpos = result["qpos"]
         if qpos.shape[1] != 7 + len(names):
             raise ValueError(f"{stem}: qpos has {qpos.shape[1]} columns, expected {7 + len(names)}")
         np.savetxt(args.out_dir / f"{stem}.csv", convert(qpos), delimiter=",", header=header, comments="", fmt="%.6f")

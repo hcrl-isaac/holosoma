@@ -19,9 +19,9 @@ import mujoco
 import numpy as np
 
 from holosoma_retargeting.config_types.data_type import G1FK_DEMO_JOINTS, TOE_NAMES_BY_FORMAT
-from holosoma_retargeting.hcrl.courts_to_scene import DEFAULT_ROBOT_XML, build_court_files
-from holosoma_retargeting.hcrl.csv_to_g1fk import qpos_row
-from holosoma_retargeting.hcrl.stance_windows import DOWNSAMPLE, terrain_z
+from holosoma_retargeting.data_utils.courts_to_scene import DEFAULT_ROBOT_XML, build_court_files
+from holosoma_retargeting.data_utils.csv_to_g1fk import qpos_row
+from holosoma_retargeting.src.stance_windows import DOWNSAMPLE, terrain_z
 
 G1_HEIGHT = 1.32
 TOE_ANCHOR_OFF = 0.01  # planted toe-sphere center above the plateau: r=5mm + penetration tol + margin
@@ -202,17 +202,18 @@ def main() -> None:
     ap.add_argument("--robot_xml", default=str(DEFAULT_ROBOT_XML))
     args = ap.parse_args()
 
-    d = np.load(args.npz, allow_pickle=True)
-    pos, names = d["pos"], [str(n) for n in d["names"]]
-    scale = args.scale if args.scale is not None else G1_HEIGHT / float(d["human_height"])
+    with np.load(args.npz, allow_pickle=True) as d:
+        pos, names = d["pos"], [str(n) for n in d["names"]]
+        human_height = float(d["human_height"])
+    scale = args.scale if args.scale is not None else G1_HEIGHT / human_height
     src = soma_keypoints(pos, names, scale)
 
     seq_dir = Path(args.out_root) / args.stem
     seq_dir.mkdir(parents=True, exist_ok=True)
     np.save(seq_dir / f"{args.stem}.npy", src)
 
-    hm = np.load(args.heightmap)
-    prims = heightmap_to_prims(hm["grid"], hm["origin"], float(hm["resolution"]))
+    with np.load(args.heightmap) as hm:
+        prims = heightmap_to_prims(hm["grid"], hm["origin"], float(hm["resolution"]))
     for p in prims:  # uniform scale about the world origin, same as the source keypoints
         p["pos"] = [round(v * scale, 4) for v in p["pos"]]
         p["size"] = [round(v * scale, 4) for v in p["size"]]

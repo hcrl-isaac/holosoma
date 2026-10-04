@@ -1,7 +1,7 @@
 """AMASS / OMOMO npz -> smplx-format retargeting source npz.
 
 Both corpora store SMPL(-H/-X) pose parameters rather than joint positions, so joints come from
-:mod:`holosoma_retargeting.hcrl.smpl_fk`, exactly as the Soccer-X adapter does. The output layout is
+:mod:`holosoma_retargeting.data_utils.smpl_fk`, exactly as the Soccer-X adapter does. The output layout is
 identical to that adapter's minus the ball sidecar, so the same ``robot_retarget.py --data-format smplx
 --task-type robot_only`` invocation consumes it.
 
@@ -20,7 +20,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 
-from holosoma_retargeting.hcrl.smpl_fk import (
+from holosoma_retargeting.data_utils.smpl_fk import (
     SMPL_BODY_JOINTS,
     load_smpl_model,
     plane_normals,
@@ -45,7 +45,7 @@ FRAME_RATE_KEYS = ("mocap_framerate", "mocap_frame_rate", "frame_rate", "fps")
 SPLIT_POSE_KEYS = ("root_orient", "pose_body")
 
 
-def _resample(values: np.ndarray, source_fps: float, target_fps: float) -> np.ndarray:
+def resample(values: np.ndarray, source_fps: float, target_fps: float) -> np.ndarray:
     """Nearest-frame resample along axis 0, since axis-angle poses cannot be interpolated componentwise.
 
     Args:
@@ -238,8 +238,8 @@ def convert_clip(
     gender = _gender(raw)
     model, clip_soles = models.get(gender, models["neutral"]), soles.get(gender, soles["neutral"])
     source_fps = _frame_rate(raw) if source_fps is None else source_fps
-    poses = _resample(_body_pose(_source_poses(raw)), source_fps, target_fps)
-    trans = _resample(np.asarray(raw["trans"], dtype=np.float64), source_fps, target_fps)
+    poses = resample(_body_pose(_source_poses(raw)), source_fps, target_fps)
+    trans = resample(np.asarray(raw["trans"], dtype=np.float64), source_fps, target_fps)
 
     orient = to_z_up if rotate_to_z_up else (lambda p: p)
     joints = orient(smpl_joint_positions(model, poses, trans))[:, :SMPL_BODY_JOINTS]
@@ -343,7 +343,7 @@ def main() -> None:
         "--up-axis",
         choices=("auto", "y", "z"),
         default="auto",
-        help="Source frame's up-axis. 'auto' votes over sampled clips, which is per-CORPUS: a per-clip "
+        help="Source frame's up-axis. 'auto' votes over sampled clips, which is per corpus: a per-clip "
         "rule follows posture and mangles lying/crawling motions.",
     )
     parser.add_argument(

@@ -5,7 +5,7 @@ the joints right-for-left to match, so every take comes out mirrored: the robot 
 hand. Written here in ``LAFAN_DEMO_JOINTS`` order by name with the forward axis negated, the loader's
 transform lands on a proper rotation instead.
 
-    python -m holosoma_retargeting.hcrl.lafan_source --bvh-dir <bvh> --positions-dir <npy> --out-dir <src> \
+    python -m holosoma_retargeting.data_utils.lafan_source --bvh-dir <bvh> --positions-dir <npy> --out-dir <src> \
         sprint1_subject2 walk3_subject4:198:212
 """
 

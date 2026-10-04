@@ -16,7 +16,7 @@ import pandas as pd
 from scipy.interpolate import PchipInterpolator
 from scipy.spatial.transform import Rotation, Slerp
 
-from holosoma_retargeting.hcrl.csv_to_g1fk import DEFAULT_MODEL
+from holosoma_retargeting.data_utils.csv_to_g1fk import DEFAULT_MODEL
 
 
 def qpos_to_csv(qpos: np.ndarray, model: mujoco.MjModel, columns: list[str], up: int) -> pd.DataFrame:
@@ -60,11 +60,12 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     for f in args.qpos_npz:
-        d = np.load(f, allow_pickle=True)
-        table = qpos_to_csv(np.asarray(d["qpos"]), model, columns, args.upsample)
+        with np.load(f, allow_pickle=True) as d:
+            qpos = np.asarray(d["qpos"])
+        table = qpos_to_csv(qpos, model, columns, args.upsample)
         stem = Path(f).stem.replace("_original", "")
         table.to_csv(out_dir / f"{stem}.csv", index=False)
-        print(f"[qpos2csv] {stem}: {d['qpos'].shape} -> {len(table)} rows")
+        print(f"[qpos2csv] {stem}: {qpos.shape} -> {len(table)} rows")
 
 
 if __name__ == "__main__":
