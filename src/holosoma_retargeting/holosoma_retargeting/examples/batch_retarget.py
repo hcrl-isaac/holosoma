@@ -28,9 +28,10 @@ import numpy as np
 import pandas as pd
 
 from holosoma_retargeting.config_types.data_type import TOE_NAMES_BY_FORMAT
-from holosoma_retargeting.hcrl import courts_to_scene, stance_windows
-from holosoma_retargeting.hcrl.csv_to_g1fk import DEFAULT_MODEL, fk_positions, qpos_row
-from holosoma_retargeting.hcrl.qpos_to_csv import qpos_to_csv
+from holosoma_retargeting.data_conversion.qpos_to_csv import qpos_to_csv
+from holosoma_retargeting.data_utils import courts_to_scene
+from holosoma_retargeting.data_utils.csv_to_g1fk import DEFAULT_MODEL, fk_positions, qpos_row
+from holosoma_retargeting.src import stance_windows
 
 PKG = Path(__file__).resolve().parents[1]
 

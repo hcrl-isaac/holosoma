@@ -19,9 +19,9 @@ import mujoco
 import numpy as np
 
 from holosoma_retargeting.config_types.data_type import G1FK_DEMO_JOINTS, TOE_NAMES_BY_FORMAT
-from holosoma_retargeting.hcrl.courts_to_scene import DEFAULT_ROBOT_XML, build_court_files
-from holosoma_retargeting.hcrl.csv_to_g1fk import qpos_row
-from holosoma_retargeting.hcrl.stance_windows import DOWNSAMPLE, terrain_z
+from holosoma_retargeting.data_utils.courts_to_scene import DEFAULT_ROBOT_XML, build_court_files
+from holosoma_retargeting.data_utils.csv_to_g1fk import qpos_row
+from holosoma_retargeting.src.stance_windows import DOWNSAMPLE, terrain_z
 
 G1_HEIGHT = 1.32
 TOE_ANCHOR_OFF = 0.01  # planted toe-sphere center above the plateau: r=5mm + penetration tol + margin

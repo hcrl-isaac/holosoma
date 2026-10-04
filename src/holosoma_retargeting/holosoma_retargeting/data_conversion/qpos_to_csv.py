@@ -16,7 +16,7 @@ import pandas as pd
 from scipy.interpolate import PchipInterpolator
 from scipy.spatial.transform import Rotation, Slerp
 
-from holosoma_retargeting.hcrl.csv_to_g1fk import DEFAULT_MODEL
+from holosoma_retargeting.data_utils.csv_to_g1fk import DEFAULT_MODEL
 
 
 def qpos_to_csv(qpos: np.ndarray, model: mujoco.MjModel, columns: list[str], up: int) -> pd.DataFrame:

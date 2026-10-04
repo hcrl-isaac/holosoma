@@ -1,7 +1,7 @@
 """Soccer-X clip .pt -> smplx-format retargeting source npz (+ ball/label sidecar).
 
 Soccer-X stores SMPL pose parameters rather than joint positions, so joints are produced by
-:mod:`holosoma_retargeting.hcrl.smpl_fk`. Its first 22 SMPL joints are exactly ``SMPLX_DEMO_JOINTS``.
+:mod:`holosoma_retargeting.data_utils.smpl_fk`. Its first 22 SMPL joints are exactly ``SMPLX_DEMO_JOINTS``.
 """
 
 from __future__ import annotations
@@ -13,8 +13,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from holosoma_retargeting.hcrl.ball_contact import BALL_RADIUS_M
-from holosoma_retargeting.hcrl.smpl_fk import (
+from holosoma_retargeting.data_utils.smpl_fk import (
     SMPL_BODY_JOINTS,
     foot_vertices,
     load_smpl_model,
@@ -24,6 +23,7 @@ from holosoma_retargeting.hcrl.smpl_fk import (
     sole_vertices,
     to_z_up,
 )
+from holosoma_retargeting.src.ball_contact import BALL_RADIUS_M
 
 
 def convert_clip(

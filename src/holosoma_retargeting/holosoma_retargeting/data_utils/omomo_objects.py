@@ -14,7 +14,7 @@ import pathlib
 import joblib
 import numpy as np
 
-from holosoma_retargeting.hcrl.amass_source import resample
+from holosoma_retargeting.data_utils.amass_source import resample
 
 # per-frame arrays of a converted clip, all cut to the object track's length
 PER_FRAME_KEYS = ("global_joint_positions", "sole_normal", "sole_height")

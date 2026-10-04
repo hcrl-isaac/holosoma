@@ -1,4 +1,4 @@
-"""CPU tests for the hcrl source adapters and solver configuration (no solve, no rendering)."""
+"""CPU tests for the source adapters and solver configuration (no solve, no rendering)."""
 
 from __future__ import annotations
 
@@ -11,9 +11,10 @@ import pytest
 from holosoma_retargeting.config_types.data_type import DEMO_JOINTS_REGISTRY, G1FK_DEMO_JOINTS, TOE_NAMES_BY_FORMAT
 from holosoma_retargeting.config_types.robot import RobotConfig
 from holosoma_retargeting.config_types.terms import SolverTerms, preset_terms
-from holosoma_retargeting.hcrl import amass_source, smpl_fk, stance_windows
-from holosoma_retargeting.hcrl.limb_retarget import rescale_to_robot_limbs
-from holosoma_retargeting.hcrl.source_angles import t1_joint_angle_targets
+from holosoma_retargeting.data_utils import amass_source, smpl_fk
+from holosoma_retargeting.src import stance_windows
+from holosoma_retargeting.src.limb_retarget import rescale_to_robot_limbs
+from holosoma_retargeting.src.source_angles import t1_joint_angle_targets
 
 T1_MODEL = Path(__file__).resolve().parents[1] / "holosoma_retargeting" / "models" / "t1" / "t1_23dof.xml"
 

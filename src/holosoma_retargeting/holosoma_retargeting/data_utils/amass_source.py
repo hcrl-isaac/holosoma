@@ -1,7 +1,7 @@
 """AMASS / OMOMO npz -> smplx-format retargeting source npz.
 
 Both corpora store SMPL(-H/-X) pose parameters rather than joint positions, so joints come from
-:mod:`holosoma_retargeting.hcrl.smpl_fk`, exactly as the Soccer-X adapter does. The output layout is
+:mod:`holosoma_retargeting.data_utils.smpl_fk`, exactly as the Soccer-X adapter does. The output layout is
 identical to that adapter's minus the ball sidecar, so the same ``robot_retarget.py --data-format smplx
 --task-type robot_only`` invocation consumes it.
 
@@ -20,7 +20,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 
-from holosoma_retargeting.hcrl.smpl_fk import (
+from holosoma_retargeting.data_utils.smpl_fk import (
     SMPL_BODY_JOINTS,
     load_smpl_model,
     plane_normals,
