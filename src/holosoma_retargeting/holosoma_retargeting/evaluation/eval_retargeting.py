@@ -169,7 +169,7 @@ class RetargetingEvaluator:
 
         obj_Vs, obj_Fs, v_acc = [], [], 0
         for gid in range(m.ngeom):
-            if m.geom_type[gid] != mujoco.mjtGeom.mjGEOM_MESH:
+            if int(m.geom_type[gid]) != mujoco.mjtGeom.mjGEOM_MESH:
                 continue  # mesh-only
             name = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, gid) or ""
             if self.object_name not in name:

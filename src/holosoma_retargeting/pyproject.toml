@@ -32,8 +32,8 @@ dependencies = [
     "viser",
     "robot_descriptions",
     "yourdfpy",
-    # the SQP's output depends on the exact solver stack (mujoco minors already differ), so it is pinned
-    "mujoco==3.10.0",
+    # mujoco 3.12 solves within ~0.06 rad of 3.10 rather than bit-identically, and every result records its stack
+    "mujoco>=3.10",
     "cvxpy==1.5.4",  # 1.6+ wheels need numpy>=2
     "clarabel==0.11.1",
     "libigl",

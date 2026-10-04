@@ -421,7 +421,7 @@ def run_simulator(args_cli: DataConversionConfig):
     # Prepare dof index for mujoco to correctly assign the values from input data
     dof_name_list = []
     for i in range(robot.njnt):  # 'nv' is the number of DoFs
-        if robot.jnt_type[i] == mujoco.mjtJoint.mjJNT_FREE:
+        if int(robot.jnt_type[i]) == mujoco.mjtJoint.mjJNT_FREE:
             continue
         dof_name = mujoco.mj_id2name(robot, mujoco.mjtObj.mjOBJ_JOINT, i)
         dof_name_list.append(dof_name)
