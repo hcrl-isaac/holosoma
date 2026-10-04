@@ -166,7 +166,7 @@ def validate_config(cfg: RetargetingConfig) -> None:
     # Task-specific format requirements
     if cfg.task_type == "climbing" and cfg.data_format not in (None, "mocap", "g1fk"):
         raise ValueError("Climbing task requires 'mocap' data format")
-    # smplx is the 22-joint body layout our OMOMO sources use; smplh assumes the 52-joint set
+    # smplx is the 22-joint body layout of the OMOMO sources, while smplh assumes the 52-joint set
     if cfg.task_type == "object_interaction" and cfg.data_format not in (None, "smplh", "smplx"):
         raise ValueError("Object interaction requires 'smplh' data format")
     # robot_only accepts any format in the registry (already validated above)
@@ -441,8 +441,8 @@ def _compute_q_init_base(
         if retargeter is None:
             raise ValueError("retargeter is required for climbing task")
         if data_format == "g1fk":
-            # robot-FK pseudo-source: the SOURCE csv carries the full initial pose -- init from it (the
-            # identity-retarget start; joints-at-zero sinks feet into thin terrain like the edge beam)
+            # the robot-FK pseudo-source carries its full initial pose, while zero joints would sink the
+            # feet into thin terrain
             seq_dir = Path(constants.OBJECT_DIR)
             q0_path = seq_dir / f"{seq_dir.name}_q0.npy"
             if q0_path.exists():
@@ -527,8 +527,8 @@ def build_retargeter_kwargs_from_config(
     }
     if task_type == "climbing":
         kwargs["nominal_tracking_tau"] = retargeter_config.nominal_tracking_tau
-    # body pairs kept apart; the non-penetration constraint only ever pairs the robot with the
-    # ground/object, so feet may cross without this
+    # body pairs kept apart, since the non-penetration constraint only pairs the robot with the ground or
+    # object and the feet could otherwise cross
     _sc_pairs = (terms.self_collision if terms is not None else "").strip()
     if _sc_pairs:
         from holosoma_retargeting.config_types.retargeter import SelfCollisionConfig
@@ -723,16 +723,16 @@ def main(cfg: RetargetingConfig) -> None:
     retargeter_kwargs = build_retargeter_kwargs_from_config(
         cfg.retargeter, constants, object_urdf_path, task_type, terms
     )
-    # hcrl: per-window foot z-lock from precomputed stance windows (see hcrl/stance_windows.py) --
-    # xy sticking alone stops skate but nothing pulls a hovering source foot DOWN to the surface.
+    # per-window foot z-lock from precomputed stance windows (hcrl/stance_windows.py), since xy sticking
+    # alone never pulls a hovering source foot down to the surface
     _stick_path = data_path / task_name / f"{task_name}_foot_sticking.npz" if task_type == "climbing" else None
     if _stick_path is not None and _stick_path.exists():
         _sw = np.load(_stick_path, allow_pickle=True)
         if "windows_left" in _sw and "windows_right" in _sw:
             from holosoma_retargeting.config_types.retargeter import FootLockConfig
 
-            # the anchored link must be a constrainable foot link; add the toe spheres (the stance
-            # detector's keypoint) to the sticking-link set the Jacobians are built for
+            # the anchored toe spheres (the stance detector's keypoint) must be in the sticking-link set
+            # the Jacobians are built for
             _tc = retargeter_kwargs["task_constants"]
             for _toe in ("left_ankle_roll_sphere_5_link", "right_ankle_roll_sphere_5_link"):
                 if _toe not in _tc.FOOT_STICKING_LINKS:
@@ -755,17 +755,17 @@ def main(cfg: RetargetingConfig) -> None:
     retargeter.teleport_guard = terms.teleport_guard
     if not terms.foot_sticking:
         retargeter.activate_foot_sticking = False
-    # the G1 config's hand-tuned regularizers, translated to the T1 (waist posture cost; elbow flexion
-    # capped to the same 2/3 of its range the G1's elbow gets)
+    # the G1 config's hand-tuned regularizers translated to the T1: a waist posture cost, and elbow
+    # flexion capped to the same 2/3 of its range the G1's elbow gets
     if terms.t1_manual and robot == "t1":
         _rows = retargeter._resolve_joint_rows(("Waist",))
         retargeter.Q_diag[_rows] = terms.waist_cost
-        # hip yaw's axis is nearly collinear with the thigh, so keypoints barely observe it; damp it
+        # hip yaw's axis is nearly collinear with the thigh, so keypoints barely observe it
         _hy = terms.hip_yaw_cost
         if _hy > 0:
             retargeter.Q_diag[retargeter._resolve_joint_rows(("Left_Hip_Yaw", "Right_Hip_Yaw"))] = _hy
         # Shoulder_Pitch runs to -190 deg, so a hand in front is also reachable with the arm swung over
-        # the back; a posture cost makes that branch pay.
+        # the back, and a posture cost makes that branch pay
         _sc = terms.shoulder_cost
         if _sc > 0:
             retargeter.Q_diag[retargeter._resolve_joint_rows(("Left_Shoulder_Pitch", "Right_Shoulder_Pitch"))] = _sc
@@ -780,15 +780,8 @@ def main(cfg: RetargetingConfig) -> None:
             "T1 manual regularizers: waist cost %.2f, elbow flexion cap %.2f", retargeter.Q_diag[_rows][0], _cap
         )
 
-    # hcrl: anti-oscillation damping when stance windows are active -- with the toe anchored and
-    # sole-sphere XY stuck, the lateral-lean null space is near-tied and flips at 15 Hz (ankle-roll
-    # rocking, mm-scale root wobble). Ankle roll gets velocity damping (stance roll velocity ~ 0);
-    # everything else gets acceleration damping, which is free on smooth motion so it cannot drag.
-    # hcrl: acceleration damping is gated on foot_lock above, which only ever fires for climbing clips,
-    # so ordinary retargets ran with accel_damp_weight=0 and snapped frame to frame. The term costs
-    # nothing at constant velocity, so applying it generally smooths the solve without dragging motion.
-    # hcrl: the root's quaternion rows (qpos 3..6) get the same scalar smoothing as a knee, so the
-    # torso can swing frame to frame while the joints look smooth. Boost just those rows.
+    # the root quaternion rows (qpos 3..6) otherwise get a knee's scalar smoothing, which lets the torso
+    # swing frame to frame while the joints look smooth
     if terms.smooth_weight is not None:
         retargeter.smooth_weight = float(terms.smooth_weight)
     _rootw = terms.root_smooth
@@ -803,8 +796,8 @@ def main(cfg: RetargetingConfig) -> None:
         _smooth_rows(retargeter)[7:] = _jsm
         logger.info("Joint smoothing weight (all actuated): %.1f", _jsm)
 
-    # hcrl: the upper-arm twist (T1 Elbow_Pitch) is unobserved by keypoints and flips between the two
-    # elbow-swivel solutions in a frame; a per-joint velocity smoothing weight damps that flip.
+    # the upper-arm twist (T1 Elbow_Pitch) is unobserved by keypoints and can flip between the two
+    # elbow-swivel solutions in one frame
     _tws = terms.twist_smooth
     if _tws > 0 and retargeter.q_a_init_idx == -7:
         _smooth_rows(retargeter)[retargeter._resolve_joint_rows(("Left_Elbow_Pitch", "Right_Elbow_Pitch"))] = _tws
@@ -855,7 +848,7 @@ def main(cfg: RetargetingConfig) -> None:
         retargeter.arm_plane_weight = _apw
         logger.info("Arm-plane term: w=%.1f on %d arms", _apw, len(_tri))
 
-    # shoulder pitch/roll overshoot the source arm's angular rate by ~1.5x on fast arm motion
+    # shoulder pitch/roll can overshoot the source arm's angular rate on fast arm motion
     _shs = terms.shoulder_smooth
     if _shs > 0 and retargeter.q_a_init_idx == -7:
         _shoulders = ("Left_Shoulder_Pitch", "Left_Shoulder_Roll", "Right_Shoulder_Pitch", "Right_Shoulder_Roll")
@@ -879,8 +872,7 @@ def main(cfg: RetargetingConfig) -> None:
         retargeter._dump_targets = []
         logger.info("Dumping solver targets to %s", _dump)
 
-    # convergence knobs: is the residual under-convergence (helped by more/larger steps) or the cost's
-    # own optimum (unchanged by them, meaning the term weights are what to fix)?
+    # convergence knobs, to tell under-convergence (fixed by more or larger steps) from the cost's optimum
     _ni = int(terms.n_iter)
     if _ni > 0:
         retargeter.solve_n_iter = _ni
@@ -894,6 +886,7 @@ def main(cfg: RetargetingConfig) -> None:
         retargeter.laplacian_weights = float(terms.laplacian_weight)
     retargeter.debug_terms = terms.debug_terms
 
+    # acceleration damping costs nothing at constant velocity, so it smooths without dragging motion
     if not retargeter.foot_lock.enable and terms.accel_damp > 0:
         retargeter.accel_damp_weight = float(terms.accel_damp)
         logger.info(
@@ -923,7 +916,7 @@ def main(cfg: RetargetingConfig) -> None:
         # stance ankle roll gets velocity damping: with the toe anchored the lateral-lean null space flips
         _rolls = tuple(joints[-1] for joints in retargeter.task_constants.ANKLE_JOINTS.values())
         _smooth_rows(retargeter)[retargeter._resolve_joint_rows(_rolls)] = 3.0
-        # 1.0 is the sweet spot: 4.0 carries momentum through landings (foot/root overshoot then correct)
+        # heavier damping carries momentum through landings, overshooting the foot and root
         retargeter.accel_damp_weight = 1.0
         # position pins alone snap the ankle attitude the frame a stance window binds
         retargeter.foot_orient_weight = 30.0
@@ -956,17 +949,15 @@ def main(cfg: RetargetingConfig) -> None:
         augmentation_translation=_AUGMENTATION_TRANSLATION,
     )
 
-    # Extract foot sticking sequences. A precomputed override (hcrl/stance_windows.py: position+height
-    # rule against the terrain) takes priority -- the velocity heuristic finds nothing on IK-retargeted
-    # sources whose stance feet skate faster than 1 cm/s.
-    # Per-clip toe-step cap from the SOURCE: motion that is genuinely fast (a kick, a jump) must not be
-    # flattened by a fixed cap, while anything faster than the source itself is a teleport.
+    # Per-clip toe-step cap from the source, so a genuinely fast kick or jump is not flattened while a toe
+    # moving faster than the source itself counts as a teleport.
     _toe_idx = [retargeter.demo_joints.index(t) for t in toe_names]
     _steps = np.zeros((len(human_joints), 2))
     _steps[1:] = np.linalg.norm(np.diff(human_joints[:, _toe_idx], axis=0), axis=2)
     _steps = np.maximum(_steps, np.roll(_steps, 1, axis=0))  # 2-frame max: tolerate phase offsets
     toe_step_cap = np.maximum(DEFAULT_TOE_STEP_CAP, TOE_STEP_CAP_SOURCE_SCALE * _steps)
 
+    # a precomputed stance file overrides the velocity heuristic, which misses stance feet that skate
     sticking_file = data_path / task_name / f"{task_name}_foot_sticking.npz" if task_type == "climbing" else None
     if sticking_file is not None and sticking_file.exists():
         _stick = np.load(sticking_file, allow_pickle=True)
@@ -1020,18 +1011,16 @@ def main(cfg: RetargetingConfig) -> None:
         toe_step_cap[:, 1].max(),
     )
 
-    # Source sole planes, when the format supplies them: the joint mapping pins only an ankle and a
-    # toe per foot, which leaves pitch/roll free and lets the sole settle toe-down. Scaling and
-    # translation upstream preserve normal directions, so these need no transform.
+    # Source sole planes, when the format supplies them, pin the foot pitch and roll the joint mapping
+    # leaves free. Scaling and translation preserve normal directions, so they need no transform.
     sole_normal_file = data_path / f"{task_name}.npz"
     if sole_normal_file.exists():
         with np.load(str(sole_normal_file)) as source_npz:
             sole_normal = source_npz.get("sole_normal")
             source_npz_height = source_npz.get("sole_height")
         if sole_normal is not None:
-            # The SMPL-derived sole normal reads 5-15 deg toe-up while the foot is planted, and the
-            # sole term follows it. Remove each foot's planted-frame median pitch about its lateral
-            # axis (calib), or force planted soles flat (flat), or leave it (off).
+            # The SMPL-derived sole normal reads toe-up on a planted foot: remove each foot's planted median
+            # pitch (calib), force planted soles flat (flat), or leave it (off).
             _mode = terms.sole_planted
             if _mode != "off" and source_npz_height is not None:
                 sole_normal = np.array(sole_normal, dtype=np.float64)
@@ -1061,8 +1050,8 @@ def main(cfg: RetargetingConfig) -> None:
                 sole_normal /= np.linalg.norm(sole_normal, axis=-1, keepdims=True) + 1e-9
             retargeter.sole_normal_seq = sole_normal
             retargeter.sole_normal_weight = terms.sole_weight
-            # heights are source-scale like the keypoints, so they need the same smpl_scale; the
-            # clamp keeps a noisy source frame from ever commanding the sole below the floor
+            # heights are source-scale like the keypoints, and the clamp keeps a noisy source frame from
+            # commanding the sole below the floor
             retargeter.sole_height_seq = np.maximum(source_npz_height * smpl_scale, 0.0)
             retargeter.sole_height_weight = terms.sole_height_weight
             tilt = np.degrees(np.arccos(np.clip(sole_normal[..., 2], -1.0, 1.0)))
@@ -1072,9 +1061,8 @@ def main(cfg: RetargetingConfig) -> None:
                 float(np.median(tilt)),
             )
 
-        # hcrl: the SMPL toe joint sits 3-6 cm above the sole where the robot's toe sphere is the sole,
-        # so a planted source foot asks the robot foot to hover. Measure the planted-frame median toe
-        # height and let the retargeter drop the whole target by it (after any limb rescale).
+        # the SMPL toe joint sits above the sole while the robot's toe sphere is the sole, so the targets
+        # drop by the planted source toe's height above the robot's (after any limb rescale)
         if terms.foot_calib and source_npz_height is not None:
             planted = (source_npz_height[: len(human_joints)] * smpl_scale) < 0.03
             _rm, _rd = retargeter.robot_model, retargeter.robot_data
@@ -1096,9 +1084,8 @@ def main(cfg: RetargetingConfig) -> None:
                     1000 * retargeter.ground_kp_offset,
                 )
 
-    # A ball keeps its real radius while the human shrinks to robot size, so scaled contact geometry
-    # ends up inside it. Ball centres come from the source's own sidecar and ride along to the output.
-    # A splined sidecar is preferred: the raw Soccer-X ball track is low fidelity.
+    # The ball keeps its real radius while the human shrinks, so scaled feet would end up inside it. A
+    # splined sidecar is preferred over the low-fidelity raw Soccer-X track.
     ball_file = data_path / f"{task_name}.ball_smooth.npz"
     if not ball_file.exists():
         ball_file = data_path / f"{task_name}.ball.npz"
@@ -1128,11 +1115,11 @@ def main(cfg: RetargetingConfig) -> None:
                 "yes" if ball_gap is not None else "MISSING (non-penetration only)",
                 100 * float(tracked.mean()),
             )
-            # hcrl: optionally HOLD the entry distance r0 through each detected dribble contact -- the
-            # clearance cost alone cannot beat ~50 mm of solver noise, the hard radial band can.
+            # optionally hold the entry distance through each detected dribble contact with a hard radial
+            # band, which the soft clearance cost cannot enforce against solver noise
             if terms.ball_constraint:
                 _segs = []
-                # J_OC_dict in the solver is keyed by SOURCE keypoint names, not robot links
+                # J_OC_dict in the solver is keyed by source keypoint names, not robot links
                 for _toe_j, _toe_link in ((10, "L_Foot"), (11, "R_Foot")):
                     _d = np.linalg.norm(human_joints[:, _toe_j] - retargeter.ball_seq, axis=1)
                     _enter, _exit = 0.16 * smpl_scale, 0.22 * smpl_scale

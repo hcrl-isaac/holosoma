@@ -1,7 +1,7 @@
 """Robot- and format-agnostic quality metrics for a retarget output.
 
 Reads a ``robot_retarget.py`` output npz (``qpos``, ``human_joints``) and scores it by mujoco-FK of
-the OUTPUT, so the numbers reflect what the solve actually produced rather than what it was asked for.
+the output, so the numbers reflect what the solve produced rather than what it was asked for.
 
 TODO: the terrain model here is a flat floor at z=0. Clips retargeted against fitted courts (boxes,
 stairs, edges) need the per-clip surface instead -- pass a ``terrain_z`` callable once the court
@@ -14,19 +14,18 @@ from __future__ import annotations
 import mujoco
 import numpy as np
 
-# A snap is a toe jump that is both absolutely large and much larger than the source's own step.
-# The constrained solve trails the source by up to a frame through hard decelerations, so the source
-# step is taken over a small window rather than the same frame.
+# A snap is a toe jump both absolutely large and much larger than the source's own step, taken over a
+# small window because the solve can trail the source by a frame through hard decelerations.
 SNAP_ABS_M = 0.08
 SNAP_REL = 1.5
 SNAP_LAG_FRAMES = 1
 
-# A source step this large is only physical for a kick; isolated ones (no comparable neighbour) are
-# mocap teleports in the source itself, which retargeting faithfully reproduces.
+# A source step this large is only physical for a kick, so an isolated one (no comparable neighbour) is
+# a mocap teleport in the source itself.
 SOURCE_TELEPORT_M = 0.30
 SOURCE_TELEPORT_ISOLATION = 0.15
 
-# A source toe below this is treated as planted; the robot's sole must follow within the tolerance.
+# A source toe below this counts as planted, and the robot's sole must follow it within the tolerance.
 SOURCE_PLANTED_M = 0.03
 SOLE_FOLLOW_TOL_M = 0.02
 
@@ -84,8 +83,8 @@ def score(
         terrain_z: Callable mapping (..., 2) xy points to surface height.
 
     Returns:
-        Dict of metric name to value; ``snaps`` is the shipping gate and must be 0. ``support_coverage``
-        is measured only over frames where the source itself is planted.
+        Dict of metric name to value. ``snaps`` should be 0, and ``support_coverage`` covers only the
+        frames where the source itself is planted.
     """
     soles = sole_positions(model, qpos, sole_links)
     sides = list(sole_links)
@@ -128,7 +127,7 @@ def score(
 
 
 def source_teleports(source_toes: np.ndarray) -> int:
-    """Count isolated toe jumps in the SOURCE, which no retargeting setting can fix.
+    """Count isolated toe jumps in the source, which no retargeting setting can fix.
 
     Args:
         source_toes: Source toe keypoints, shape (T, 2, 3).

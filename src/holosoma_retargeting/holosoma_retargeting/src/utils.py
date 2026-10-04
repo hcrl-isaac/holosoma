@@ -243,8 +243,8 @@ def preprocess_motion_data(
     human_joints = human_joints * scale
 
     if object_poses is not None:
-        # the default keeps the object's absolute height (its real size next to the robot); a human shrunk to
-        # robot size needs the object shrunk too, or the robot reaches for something out of range
+        # by default the object keeps its absolute height, but a human shrunk to robot size can only reach
+        # an object shrunk with it
         if object_full_scale:
             object_poses[:, -3:] = object_poses[:, -3:] * scale
         else:
@@ -725,7 +725,17 @@ def extract_foot_sticking_sequence_velocity(smpl_joints, demo_joints, foot_names
 
 
 def _stance_with_hysteresis(speed, threshold, release_ratio=2.0, min_run=3):
-    """Stance mask from a per-frame speed: enter below ``threshold``, leave above ``release_ratio`` x it."""
+    """Stance mask from a per-frame speed: enter below ``threshold``, leave above ``release_ratio`` x it.
+
+    Args:
+        speed: Per-frame foot speed, shape (T,).
+        threshold: Speed below which a swing foot enters stance.
+        release_ratio: Multiple of ``threshold`` above which a stance foot leaves it.
+        min_run: Runs of either state shorter than this many frames take the surrounding state.
+
+    Returns:
+        Boolean stance mask, shape (T,).
+    """
     stance = np.zeros(len(speed), dtype=bool)
     on = False
     for i, v in enumerate(speed):
@@ -791,7 +801,7 @@ def estimate_human_orientation(human_joints, joint_names, frame_idx=0):
     Returns:
         np.ndarray: Quaternion [w, x, y, z] representing the human's global orientation
     """
-    # For g1fk (robot-FK pseudo-source): yaw from the hip lateral axis; no spine keypoint needed
+    # g1fk (robot-FK pseudo-source) has no spine keypoint, so yaw comes from the hip lateral axis
     if "pelvis_contour_link" in joint_names:
         lhip = human_joints[frame_idx, joint_names.index("left_hip_pitch_link")]
         rhip = human_joints[frame_idx, joint_names.index("right_hip_pitch_link")]

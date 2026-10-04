@@ -1,11 +1,11 @@
 """SOMA skeleton npz -> g1fk climbing seq dir: source npy + q0 + verified stance windows + terrain scene.
 
-Replaces the shipped-IK G1 FK pseudo-source with the clean SOMA skeleton (world Z-up meters, 120 fps):
-bones map onto the ``G1FK_DEMO_JOINTS`` keypoint set and everything (keypoints, heightmap terrain,
-contact anchors) is scaled by ONE uniform factor ``robot_height / human_height`` about the world
+Uses the SOMA skeleton (world Z-up meters, 120 fps) as the pseudo-source in place of the shipped-IK G1
+FK: bones map onto the ``G1FK_DEMO_JOINTS`` keypoint set and everything (keypoints, heightmap terrain,
+contact anchors) is scaled by one uniform factor ``robot_height / human_height`` about the world
 origin, so the solve happens in a consistent similarity-transformed world. Stance windows come
-straight from scenebot's verified contact intervals (``<stem>_contacts.json``) -- the Viterbi /
-threshold contact detection that caused foot snapping on dirty sources is bypassed entirely.
+straight from scenebot's verified contact intervals (``<stem>_contacts.json``) rather than from
+contact detection on the source.
 """
 
 from __future__ import annotations
@@ -48,13 +48,32 @@ SOMA_TO_G1FK = {
 
 
 def soma_keypoints(pos: np.ndarray, names: list[str], scale: float) -> np.ndarray:
-    """(T, 78, 3) SOMA bone positions -> (T, 15, 3) scaled keypoints in G1FK_DEMO_JOINTS order."""
+    """Pick and scale the SOMA bones that stand in for the g1fk keypoints.
+
+    Args:
+        pos: SOMA bone positions, shape (T, 78, 3).
+        names: SOMA bone names in ``pos`` order.
+        scale: Uniform human-to-robot scale.
+
+    Returns:
+        Scaled keypoints in ``G1FK_DEMO_JOINTS`` order, shape (T, 15, 3).
+    """
     idx = [names.index(SOMA_TO_G1FK[j]) for j in G1FK_DEMO_JOINTS]
     return (pos[:, idx].astype(np.float64) * scale).astype(np.float32)
 
 
 def heightmap_to_prims(grid: np.ndarray, origin: np.ndarray, res: float, min_h: float = 0.02) -> list[dict]:
-    """Heightmap -> ground-anchored cuboid prims via greedy per-height rect cover (hm_to_courts pattern)."""
+    """Cover a heightmap with ground-anchored cuboid prims, greedily per height level.
+
+    Args:
+        grid: Terrain heights, shape (rows, cols).
+        origin: World xy of the grid's first cell corner.
+        res: Cell size in metres.
+        min_h: Heights below this stay the ground plane.
+
+    Returns:
+        Prims as dicts of ``pos`` (cuboid center) and ``size``.
+    """
 
     def rects(mask: np.ndarray):
         used = np.zeros_like(mask, bool)
@@ -93,13 +112,17 @@ def heightmap_to_prims(grid: np.ndarray, origin: np.ndarray, res: float, min_h: 
 
 
 def contact_windows(contacts: dict, src: np.ndarray, scale: float, boxes: np.ndarray) -> tuple[np.ndarray, list, list]:
-    """Verified 120 fps contact intervals -> solver-rate sticking mask (T30, 2) + per-foot anchor windows.
+    """Turn verified 120 fps contact intervals into a solver-rate sticking mask and per-foot anchor windows.
 
-    Each interval pins the toe sphere to ONE fixed point: xy = window-median scaled source toe (the
-    json 'point' is the sole contact centroid, not the toe), z = scaled snapped_h plateau + toe offset.
-    Windows also carry the source-implied stance ATTITUDE (yaw, pitch of the window-median ankle->toe
-    axis, pitch relative to the skeleton's flat-stance axis): steep-descent stances rest toe-down, so
-    a terrain-flat orientation target would drag the anchored toe off the plateau.
+    Args:
+        contacts: scenebot contacts json, with per-side ``feet`` intervals and an optional ``sole_offset``.
+        src: Scaled 120 fps keypoints in ``G1FK_DEMO_JOINTS`` order, shape (T, 15, 3).
+        scale: Human-to-robot scale applied to ``src``.
+        boxes: Scaled terrain cuboids as rows of (center xyz, size xyz).
+
+    Returns:
+        ``(mask, windows_left, windows_right)``: the (T30, 2) sticking mask and per-foot rows of
+        ``[start, end, x, y, z, yaw, pitch]`` that pin the toe sphere to one point per interval.
     """
     toe_idx = [G1FK_DEMO_JOINTS.index(n) for n in TOE_NAMES_BY_FORMAT["g1fk"]]
     ankle_idx = [G1FK_DEMO_JOINTS.index(f"{s}_ankle_intermediate_1_link") for s in ("left", "right")]
@@ -120,11 +143,13 @@ def contact_windows(contacts: dict, src: np.ndarray, scale: float, boxes: np.nda
             start, end = ceil(t0 / DOWNSAMPLE), (t1 - 1) // DOWNSAMPLE
             if end < start:
                 continue
+            # anchor on the source toe, since the json 'point' is the sole contact centroid
             x, y = (float(np.median(toes[t0:t1, k, a])) for a in (0, 1))
             plateau = max(float(iv["snapped_h"]) * scale, 0.0)
             surf = float(terrain_z(np.array([[x, y]]), boxes)[0])
             if abs(surf - plateau) > 0.02:
                 print(f"[soma] WARN {side} [{start},{end}]: terrain under anchor {surf:.3f} != plateau {plateau:.3f}")
+            # keep the source's stance attitude, since steep-descent stances rest toe-down on the plateau
             axis = np.median(toes[t0:t1, k] - ankles[t0:t1, k], axis=0)
             yaw = float(np.arctan2(axis[1], axis[0]))
             pitch = float(np.arctan2(-axis[2], np.hypot(axis[0], axis[1]))) - pitch_flat  # toe-down positive
@@ -136,10 +161,17 @@ def contact_windows(contacts: dict, src: np.ndarray, scale: float, boxes: np.nda
 def build_q0(
     model: mujoco.MjModel, pelvis_xy: np.ndarray, yaw: float, init_csv: Path | None, ground_z: float = 0.0
 ) -> np.ndarray:
-    """Initial qpos: standing joints (+ root z) from a shipped csv row 0, root xy/yaw from SOMA frame 0.
+    """Build the initial qpos: standing joints from a shipped csv's row 0, root xy/yaw from SOMA frame 0.
 
-    ``ground_z`` lifts the root by the terrain height under the start pelvis (clips starting on a
-    box/stair top would otherwise spawn inside the geometry -- an infeasible first frame).
+    Args:
+        model: G1 mujoco model.
+        pelvis_xy: Scaled source pelvis xy at frame 0.
+        yaw: Source heading at frame 0.
+        init_csv: Shipped BONES csv supplying the standing joints, or None for a zero pose.
+        ground_z: Terrain height under the start pelvis, which the feet are lifted onto.
+
+    Returns:
+        The initial qpos, shape (nq,).
     """
     if init_csv is not None:
         q = qpos_row(model, init_csv, 0)
@@ -148,8 +180,7 @@ def build_q0(
         q[2] = 0.78
     q[:2] = pelvis_xy
     q[3:7] = (np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2))
-    # FK the lowest foot sphere and set root z so the sole rests just above the local terrain --
-    # exact regardless of the init csv's own world frame (its row-0 z may or may not include terrain)
+    # root z from the lowest foot sphere, independent of whether the init csv's z includes terrain
     data = mujoco.MjData(model)
     data.qpos[:] = q
     mujoco.mj_forward(model, data)

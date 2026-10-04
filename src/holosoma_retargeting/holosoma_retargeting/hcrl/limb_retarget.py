@@ -1,9 +1,9 @@
 """Rescale source keypoints so each limb segment matches the robot's own segment length.
 
-A single uniform height scale preserves HUMAN proportions. When the robot is not human-proportioned
-the mapped targets become unreachable, the IK saturates joints trying to span them, and the result is
-the limbs-at-odd-angles signature. Rescaling segment by segment keeps every bone DIRECTION -- which is
-what carries the pose -- while giving the solver targets the robot can actually reach.
+A single uniform height scale preserves human proportions. When the robot is not human-proportioned
+the mapped targets become unreachable and the IK saturates joints trying to span them. Rescaling
+segment by segment keeps every bone direction, which carries the pose, while giving the solver targets
+the robot can reach.
 """
 
 from __future__ import annotations
@@ -12,13 +12,7 @@ import numpy as np
 
 
 def robot_segment_lengths(model, data, mapping: dict[str, str], mj, samples: int = 300):
-    """Parent links, segment lengths, and whether each segment is rigid.
-
-    A segment is RIGID when the mapped child's body is a direct child of the mapped parent's body: a urdf
-    joint puts the child origin at a fixed offset, so that distance cannot change. Spanning two or more
-    joints, the distance varies with the joints in between -- prescribing its zero-pose value pins those
-    joints and the solver loses the limb. For those we record the MAXIMUM reachable distance instead, to
-    be used as a cap rather than an equality.
+    """Find each mapped keypoint's parent, segment length, and whether the segment is rigid.
 
     Args:
         model: MuJoCo model of the robot.
@@ -28,7 +22,8 @@ def robot_segment_lengths(model, data, mapping: dict[str, str], mj, samples: int
         samples: Random configurations used to bound a non-rigid span.
 
     Returns:
-        ``(parent, length, rigid)`` keyed by source-joint name.
+        ``(parent, length, rigid)`` keyed by source-joint name. A non-rigid span's ``length`` is its
+        maximum reachable distance, to be used as a cap.
     """
 
     def fk_positions(q):
@@ -36,7 +31,7 @@ def robot_segment_lengths(model, data, mapping: dict[str, str], mj, samples: int
         if q is not None:
             n = min(len(q), len(data.qpos))
             data.qpos[:n] = q[:n]
-        if model.nq >= 7:  # a zero quaternion is invalid; keep the free joint upright
+        if model.nq >= 7:  # a zero quaternion is invalid, so keep the free joint upright
             data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
         mj.mj_forward(model, data)
         return {src: np.array(data.xpos[bid]) for src, bid in body_of.items()}
@@ -62,8 +57,8 @@ def robot_segment_lengths(model, data, mapping: dict[str, str], mj, samples: int
         parent[src] = found
         hops[src] = n
         rigid[src] = found is not None and parent_body[bid] == body_of[found]
-    # A keypoint body that is not an ancestor of the others (a pelvis marker hung off the trunk) still
-    # roots the chains: keypoints with no mapped ancestor hang from it; the sampling below decides rigidity.
+    # Keypoints with no mapped ancestor hang from the root keypoint, even when its body is not their
+    # ancestor (a pelvis marker hung off the trunk).
     from holosoma_retargeting.config_types.data_type import root_keypoint
 
     root = root_keypoint(list(mapping))
@@ -97,8 +92,8 @@ def robot_segment_lengths(model, data, mapping: dict[str, str], mj, samples: int
             pos = fk_positions(q)
             dist = float(np.linalg.norm(pos[src] - pos[p_src]))
             best, worst = max(best, dist), min(worst, dist)
-        # A span whose joints barely change its length (a waist yaw between pelvis and hip) is rigid
-        # in effect; prescribing it keeps the hips where the robot's hips are.
+        # A span whose joints barely change its length (a waist yaw between pelvis and hip) is rigid in
+        # effect, and prescribing it keeps the hips where the robot's hips are.
         if best - worst < 0.1 * best:
             rigid[src] = True
             length[src] = zero
@@ -117,19 +112,14 @@ def rescale_to_robot_limbs(
 ) -> np.ndarray:
     """Rewrite keypoints so each segment is reachable, preserving directions.
 
-    Rigid segments are set to the robot's exact length. Non-rigid spans are only SHORTENED when they
-    exceed what the robot can reach, so the solver keeps the freedom to choose the joints in between.
-    ``horizontal`` segments (a foot) keep the source's vertical drop and take up the length change
-    horizontally: stretching a steep human ankle->toe to a long flat robot foot would otherwise lift
-    the ankle target off the sole.
-
     Args:
         keypoints: ``(T, K, 3)`` source keypoints, in the order of ``names``.
         names: Source-joint names matching the keypoint axis.
         parent: Source-joint -> parent source-joint (``None`` for the root).
-        length: Target length (rigid) or maximum reachable distance (non-rigid).
+        length: Target length (rigid) or maximum reachable distance (non-rigid spans are only shortened).
         rigid: Source-joint -> whether its segment to the parent is rigid. All rigid when omitted.
-        horizontal: Child names whose segment is rescaled in the horizontal plane only.
+        horizontal: Child names (a foot) whose segment keeps the source's vertical drop and takes the
+            length change horizontally.
 
     Returns:
         ``(T, K, 3)`` rescaled keypoints; the root keeps its world position.

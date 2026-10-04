@@ -46,24 +46,23 @@ def convert_clip(
     joints = smpl_joint_positions(model, poses, trans)
     joints = to_z_up(joints)[:, :SMPL_BODY_JOINTS]
     ball = to_z_up(clip["soccer_pos"].numpy().astype(np.float64))
-    # Sole plane per foot: the retargeter matches the robot sole's normal to this, which is the only
-    # thing that pins foot pitch/roll -- the joint mapping alone leaves them free.
+    # sole plane per foot, since the joint mapping alone leaves the robot's foot pitch and roll free
     sole_points = [to_z_up(skin_vertices(model, poses, trans, soles[side])) for side in ("left", "right")]
     sole_normal = np.stack([plane_normals(p) for p in sole_points], axis=1)
     # lowest sole point per foot: matching the normal alone leaves the flattened foot hovering,
     # because rotating a toe-down sole flat lifts its lowest contact point
     sole_height = np.stack([p[..., 2].min(axis=1) for p in sole_points], axis=1)
 
-    # Soccer-X is ground-aligned at z=0; drop any residual so the retargeter's contact logic sees a floor.
+    # Soccer-X is nominally at z=0, so drop any residual for the retargeter's contact logic to see a floor.
     ground = float(np.median(np.min(joints[:, [10, 11], 2], axis=1)))
     joints[..., 2] -= ground
     ball[..., 2] -= ground
-    # The sole surface sits ~2 cm BELOW the toe joint, so it needs its own reference: measured against
-    # the joint-derived ground a planted sole reads about -24 mm and would be driven into the floor.
+    # The sole sits below the toe joint, so it takes its own ground reference: the joint-derived one would
+    # drive a planted sole into the floor.
     sole_height -= float(np.median(np.min(sole_height, axis=1)))
 
-    # The human's own foot-to-ball clearance is what the robot has to reproduce in ABSOLUTE terms --
-    # the ball does not shrink with the player, so the retargeter cannot infer it from scaled keypoints.
+    # The robot reproduces the human's foot-to-ball clearance unscaled, because the ball does not shrink
+    # with the player.
     foot_points = [to_z_up(skin_vertices(model, poses, trans, feet[side])) for side in ("left", "right")]
     ball_gap = np.stack(
         [np.linalg.norm(p - ball[:, None], axis=2).min(axis=1) - BALL_RADIUS_M for p in foot_points], axis=1
@@ -83,7 +82,7 @@ def convert_clip(
         "part": clip_path.parent.name,
         "label": clip["motion_label"],
         "motion_name": clip["motion_name"],
-        # a clip's "frames" field can overstate its arrays (000917 declares 4699, stores 3519)
+        # a clip's "frames" field can overstate its arrays, so count the stored frames
         "frames": int(joints.shape[0]),
         "declared_frames": int(clip["frames"]),
         "fps": 30,

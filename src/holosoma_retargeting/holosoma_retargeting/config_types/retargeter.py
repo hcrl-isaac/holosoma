@@ -26,7 +26,7 @@ class FootLockConfig:
 
     lock_links_substr: str | None = None
     """Only foot links whose name contains this substring are Z-locked (None = all foot links).
-    Locking every sphere forces an instant flat-foot mid-roll; locking just the toe keeps ankle freedom."""
+    Locking only the toe leaves the ankle free to roll instead of snapping the foot flat."""
 
 
 @dataclass(frozen=True)

@@ -1,7 +1,7 @@
 """Attach OMOMO object poses to the already-converted source clips.
 
-The source conversion kept only the human joints, so object-aware retargeting had nothing to hold onto.
-The object pose must land in the SAME frame as those joints: for OMOMO that conversion applied no
+The source conversion keeps only the human joints, so object-aware retargeting needs the object track
+added. The object pose must land in the same frame as those joints: for OMOMO that conversion applies no
 rotation and only a ground shift in z, so the object translation gets the identical shift.
 """
 

@@ -1,4 +1,4 @@
-"""Solver term weights and switches (the hcrl additions to the interaction-mesh retargeter)."""
+"""Weights and switches for the interaction-mesh retargeter's objective terms."""
 
 from __future__ import annotations
 

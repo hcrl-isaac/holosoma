@@ -13,12 +13,11 @@ from pathlib import Path
 
 import numpy as np
 
-# SMPL body joints 0-21 in model order; this is exactly holosoma's SMPLX_DEMO_JOINTS.
+# SMPL body joints 0-21 in model order, exactly holosoma's SMPLX_DEMO_JOINTS.
 SMPL_BODY_JOINTS = 22
 
-# SMPL rest frame is right-handed with +X = subject left, +Y = up, +Z = forward.
-# Cyclic permutation to the robot convention (+X forward, +Y left, +Z up) preserves handedness,
-# unlike utils.transform_y_up_to_z_up which mirrors (it targets left-handed sources).
+# Cyclic permutation from SMPL's right-handed rest frame (+X subject left, +Y up, +Z forward) to the robot's
+# (+X forward, +Y left, +Z up), keeping handedness, unlike the mirroring utils.transform_y_up_to_z_up.
 _Y_UP_TO_Z_UP = np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
 
 

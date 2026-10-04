@@ -54,7 +54,14 @@ def prep_clip(
 
 
 def solve_clip(args: tuple) -> tuple:
-    """Subprocess one retarget; returns (stem, rc, cost)."""
+    """Run one clip's retarget in a subprocess.
+
+    Args:
+        args: ``(stem, data_root, save_dir)`` for the clip.
+
+    Returns:
+        ``(stem, return code, final cost or None)``; the return code is -9 on timeout.
+    """
     stem, data_root, save_dir = args
     cmd = [
         sys.executable,
@@ -87,7 +94,16 @@ def solve_clip(args: tuple) -> tuple:
 
 
 def support_coverage(qpos: np.ndarray, boxes: np.ndarray, model: mujoco.MjModel) -> tuple[float, float]:
-    """(fraction of frames with a foot sphere within 2 cm of the surface, longest airborne stretch s)."""
+    """Score how well a retarget output stays supported by the court.
+
+    Args:
+        qpos: Retargeted G1 configuration at 30 fps, shape (T, nq).
+        boxes: Court cuboids as rows of (center xyz, size xyz).
+        model: G1 mujoco model matching ``qpos``.
+
+    Returns:
+        ``(fraction of frames with a foot sphere within 2 cm of the surface, longest airborne stretch in s)``.
+    """
     data = mujoco.MjData(model)
     sph = [[model.body(f"{s}_ankle_roll_sphere_{i}_link").id for i in range(1, 6)] for s in ("left", "right")]
     minc = np.zeros(len(qpos))

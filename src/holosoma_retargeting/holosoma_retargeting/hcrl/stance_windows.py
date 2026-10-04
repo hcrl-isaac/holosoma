@@ -21,11 +21,19 @@ import numpy as np
 
 from holosoma_retargeting.config_types.data_type import G1FK_DEMO_JOINTS, TOE_NAMES_BY_FORMAT
 
-DOWNSAMPLE = 4  # climbing task downsamples the 120 fps source x4; windows must match what it solves on
+DOWNSAMPLE = 4  # the climbing task solves on the 120 fps source downsampled x4, and windows must match
 
 
 def terrain_z(xy: np.ndarray, boxes: np.ndarray) -> np.ndarray:
-    """Surface height under each xy: highest covering cuboid top, else ground 0. xy: (F, 2)."""
+    """Surface height under each xy: the highest covering cuboid top, else the ground at 0.
+
+    Args:
+        xy: Query points, shape (F, 2).
+        boxes: Cuboids as rows of (center xyz, size xyz), shape (N, 6).
+
+    Returns:
+        Surface heights, shape (F,).
+    """
     if not len(boxes):
         return np.zeros(len(xy))
     cx, cy, cz, sx, sy, sz = boxes.T
@@ -53,11 +61,8 @@ def compute(src: np.ndarray, boxes: np.ndarray, flight_tol: float) -> tuple[np.n
     speed = np.zeros_like(clear)
     speed[1:] = np.linalg.norm(np.diff(toes[:, :, :2], axis=0), axis=2)
 
-    # Global support-state labeling (Viterbi over {both, left, right, flight}): per-frame thresholds
-    # flash in and out on dirty sources, snapping feet to new anchors at every flicker. Emissions are
-    # POSITION-based (height above the terrain under the foot -- link velocity is contaminated by base
-    # drift and only vetoes at coarse scale); the switching penalty makes uncertainty PERSIST the
-    # current state instead of flipping it.
+    # Viterbi over {both, left, right, flight}, since per-frame thresholds flicker on dirty sources. Emissions
+    # are toe heights over the terrain (speed, which carries base drift, only vetoes coarsely).
     t_n = len(toes)
     contact_cost = np.zeros((t_n, 2))
     swing_cost = np.zeros((t_n, 2))
@@ -71,7 +76,7 @@ def compute(src: np.ndarray, boxes: np.ndarray, flight_tol: float) -> tuple[np.n
         emis[:, si] = (contact_cost[:, 0] if lc else swing_cost[:, 0]) + (
             contact_cost[:, 1] if rc else swing_cost[:, 1]
         )
-    emis[:, 3] += np.maximum(0.0, flight_tol - clear.min(axis=1)) * 10.0  # flight needs BOTH feet high
+    emis[:, 3] += np.maximum(0.0, flight_tol - clear.min(axis=1)) * 10.0  # flight needs both feet high
     SWITCH = 1.2  # per-foot state change penalty: the persistence knob
     trans = np.zeros((4, 4))
     for a in range(4):
@@ -90,7 +95,7 @@ def compute(src: np.ndarray, boxes: np.ndarray, flight_tol: float) -> tuple[np.n
         path[t] = bk[t + 1, path[t + 1]]
     masks = np.array([[STATES[si][0], STATES[si][1]] for si in path], dtype=bool)
 
-    # calibrated toe-center offset above the surface when planted (per clip; sphere radius + skin)
+    # calibrated toe-center offset above the surface when planted (per clip, sphere radius + skin)
     planted = clear[masks]
     offset = (
         float(np.clip(np.percentile(planted, 20), 0.008, 0.05)) if planted.size else 0.02
@@ -105,9 +110,7 @@ def compute(src: np.ndarray, boxes: np.ndarray, flight_tol: float) -> tuple[np.n
                 e = t
                 while e + 1 < len(m) and m[e + 1]:
                     e += 1
-                # full 3D anchor from the SOURCE stance: xy = where the source foot actually plants
-                # (anchoring to the OUTPUT's own position freezes a lagging foot mid-flight), z = the
-                # surface under that spot + calibrated toe offset
+                # anchor on the source's planted xy (the output's own lags and would freeze mid-flight)
                 e_land = min(e, t + max(3, (e - t + 1) // 3))  # landing portion: before source drift accumulates
                 x_a = float(np.median(toes[t : e_land + 1, k, 0]))
                 y_a = float(np.median(toes[t : e_land + 1, k, 1]))
