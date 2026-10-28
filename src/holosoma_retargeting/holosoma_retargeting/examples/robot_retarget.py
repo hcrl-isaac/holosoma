@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
@@ -312,7 +313,7 @@ def load_motion_data(
 def write_scaled_object_models(constants: SimpleNamespace, scale: float) -> tuple[str, str]:
     """Write copies of the object urdf and the robot+object scene xml with the object mesh scaled by ``scale``.
 
-    The copies sit beside the originals (their mesh paths are relative) and are named by the scale.
+    The copies go to a fresh temp dir, since the model tree may be read-only, with their mesh paths made absolute.
 
     Args:
         constants: Task constants naming the object urdf and the robot model.
@@ -321,7 +322,7 @@ def write_scaled_object_models(constants: SimpleNamespace, scale: float) -> tupl
     Returns:
         The scaled urdf path and the scaled scene xml path.
     """
-    tag = f"_s{scale:.4f}"
+    out = Path(tempfile.mkdtemp(prefix="holosoma_scaled_"))
 
     def rescale(text: str, pattern: str) -> str:
         def sub(m: re.Match) -> str:
@@ -330,18 +331,17 @@ def write_scaled_object_models(constants: SimpleNamespace, scale: float) -> tupl
 
         return re.sub(pattern, sub, text)
 
-    def write(path: Path, text: str) -> None:
-        tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-        tmp.write_text(text)
-        tmp.replace(path)
-
-    urdf_src = Path(constants.OBJECT_URDF_FILE)
-    urdf_dst = urdf_src.with_name(urdf_src.stem + tag + urdf_src.suffix)
-    write(urdf_dst, rescale(urdf_src.read_text(), r'(<mesh filename="[^"]+"\s+scale=)"([^"]+)"'))
-    scene_src = Path(constants.ROBOT_URDF_FILE.replace(".urdf", f"_w_{constants.OBJECT_NAME}.xml"))
-    scene_dst = scene_src.with_name(scene_src.stem + tag + scene_src.suffix)
+    urdf_src = Path(constants.OBJECT_URDF_FILE).resolve()
+    urdf = rescale(urdf_src.read_text(), r'(<mesh filename="[^"]+"\s+scale=)"([^"]+)"')
+    urdf = re.sub(r'<mesh filename="([^"/][^"]*)"', lambda m: f'<mesh filename="{urdf_src.parent / m.group(1)}"', urdf)
+    urdf_dst = out / urdf_src.name
+    urdf_dst.write_text(urdf)
+    scene_src = Path(constants.ROBOT_URDF_FILE.replace(".urdf", f"_w_{constants.OBJECT_NAME}.xml")).resolve()
     mesh = re.escape(f"{constants.OBJECT_NAME}_mesh")
-    write(scene_dst, rescale(scene_src.read_text(), rf'(<mesh name="{mesh}"[^>]*?scale=)"([^"]+)"'))
+    scene = rescale(scene_src.read_text(), rf'(<mesh name="{mesh}"[^>]*?scale=)"([^"]+)"')
+    scene = re.sub(r'meshdir="([^"/][^"]*)"', lambda m: f'meshdir="{scene_src.parent / m.group(1)}"', scene)
+    scene_dst = out / scene_src.name
+    scene_dst.write_text(scene)
     return str(urdf_dst), str(scene_dst)
 
 
