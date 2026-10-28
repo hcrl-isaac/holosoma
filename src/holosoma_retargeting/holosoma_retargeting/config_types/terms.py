@@ -27,6 +27,8 @@ class SolverTerms:
     """Widen foot targets laterally to at least this toe separation (m, 0 = off)."""
     object_full_scale: bool = False
     """Scale the object's whole position with the human; off keeps its absolute height (object tasks)."""
+    object_scale_with_human: bool = False
+    """Shrink the object with the human too, so the robot reproduces a uniformly scaled scene (implies full scale)."""
 
     # --- tracking terms ---
     laplacian_weight: float | None = None

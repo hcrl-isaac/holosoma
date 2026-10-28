@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -308,6 +309,42 @@ def load_motion_data(
     return human_joints, object_poses, smpl_scale
 
 
+def write_scaled_object_models(constants: SimpleNamespace, scale: float) -> tuple[str, str]:
+    """Write copies of the object urdf and the robot+object scene xml with the object mesh scaled by ``scale``.
+
+    The copies sit beside the originals (their mesh paths are relative) and are named by the scale.
+
+    Args:
+        constants: Task constants naming the object urdf and the robot model.
+        scale: Factor applied to the object mesh's existing scale.
+
+    Returns:
+        The scaled urdf path and the scaled scene xml path.
+    """
+    tag = f"_s{scale:.4f}"
+
+    def rescale(text: str, pattern: str) -> str:
+        def sub(m: re.Match) -> str:
+            vals = " ".join(f"{float(v) * scale:.6g}" for v in m.group(2).split())
+            return f'{m.group(1)}"{vals}"'
+
+        return re.sub(pattern, sub, text)
+
+    def write(path: Path, text: str) -> None:
+        tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+        tmp.write_text(text)
+        tmp.replace(path)
+
+    urdf_src = Path(constants.OBJECT_URDF_FILE)
+    urdf_dst = urdf_src.with_name(urdf_src.stem + tag + urdf_src.suffix)
+    write(urdf_dst, rescale(urdf_src.read_text(), r'(<mesh filename="[^"]+"\s+scale=)"([^"]+)"'))
+    scene_src = Path(constants.ROBOT_URDF_FILE.replace(".urdf", f"_w_{constants.OBJECT_NAME}.xml"))
+    scene_dst = scene_src.with_name(scene_src.stem + tag + scene_src.suffix)
+    mesh = re.escape(f"{constants.OBJECT_NAME}_mesh")
+    write(scene_dst, rescale(scene_src.read_text(), rf'(<mesh name="{mesh}"[^>]*?scale=)"([^"]+)"'))
+    return str(urdf_dst), str(scene_dst)
+
+
 def setup_object_data(
     task_type: TaskType,
     constants: SimpleNamespace,
@@ -316,6 +353,7 @@ def setup_object_data(
     task_config: TaskConfig,
     augmentation: bool,
     object_scale_augmented: np.ndarray | None = None,
+    scale_with_human: bool = False,
 ) -> tuple[np.ndarray | None, np.ndarray | None, str | None]:
     """Setup object-specific data (ground, object mesh, climbing terrain).
     Args:
@@ -326,6 +364,7 @@ def setup_object_data(
         task_config: Task configuration
         augmentation: Whether augmentation is enabled
         object_scale_augmented: Scale factor for augmented objects (default: [1.0, 1.0, 1.2])
+        scale_with_human: Give the robot the object shrunk by ``smpl_scale`` (object interaction).
     Returns:
         Tuple of (object_local_pts, object_local_pts_demo, object_urdf_path)
     """
@@ -347,7 +386,11 @@ def setup_object_data(
         object_local_pts, object_local_pts_demo = load_object_data(
             constants.OBJECT_MESH_FILE, smpl_scale=smpl_scale, sample_count=100
         )
-        return object_local_pts, object_local_pts_demo, constants.OBJECT_URDF_FILE
+        if not scale_with_human:
+            return object_local_pts, object_local_pts_demo, constants.OBJECT_URDF_FILE
+        urdf, scene = write_scaled_object_models(constants, smpl_scale)
+        constants.SCENE_XML_FILE = scene
+        return object_local_pts_demo, object_local_pts_demo, urdf
 
     if task_type == "climbing":
         if object_dir is None:
@@ -715,6 +758,7 @@ def main(cfg: RetargetingConfig) -> None:
         cfg.task_config,
         cfg.augmentation,
         object_scale_augmented=_OBJECT_SCALE_AUGMENTED,
+        scale_with_human=cfg.terms.object_scale_with_human,
     )
 
     # Create retargeter
@@ -936,7 +980,7 @@ def main(cfg: RetargetingConfig) -> None:
             toe_names,
             scale=smpl_scale,
             object_poses=object_poses,
-            object_full_scale=terms.object_full_scale,
+            object_full_scale=terms.object_full_scale or terms.object_scale_with_human,
         )
 
     # Initialize robot pose
