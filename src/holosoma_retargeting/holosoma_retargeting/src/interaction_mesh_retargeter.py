@@ -144,6 +144,13 @@ class InteractionMeshRetargeter:
         self.ball_foot_points: dict[str, np.ndarray] | None = None
         self.ball_radius = 0.0
         self.ball_weight = 0.0
+        # box grip: palms held a set depth inside the face their source hand touches (0 = off)
+        self.box_grip_weight = 0.0
+        self.box_grip_depth = 0.01
+        self.box_grip_contact = 0.05
+        self.box_grip_keys: tuple[str, ...] = ("L_Wrist", "R_Wrist")
+        self.box_grip_mode = "touched"
+        self._box_local: tuple[np.ndarray, np.ndarray] | None = None
         self.foot_orient_weight = 0.0  # stance-engagement foot angular-rate damping (0 = off, see _foot_orient_damp)
         self.joint_limit_barrier_weight = 0.0  # one-sided hinge inside `margin` of an actuated stop
         self.joint_limit_barrier_margin = 0.0  # absolute cap (rad), 0 disables the barrier
@@ -1297,6 +1304,30 @@ class InteractionMeshRetargeter:
                     self.ball_weight * cp.sum_squares(cp.pos(-(rows @ dqa + (dist[deepest] - keep_out)))),
                 )
 
+        # Box grip: the source's hands float off or sink into its box, so a palm only touching the face exerts no
+        # squeeze. While a source hand touches a face, hold the palm a set depth inside that face, along its normal.
+        if self.box_grip_weight > 0 and human_src_pts is not None and self.object_name != "ground" and not init_t:
+            center, half = self._object_box()
+            keys = [k for k in self.box_grip_keys if k in J_OC_dict]
+            src = {k: human_src_pts[robot_link_keys.index(k)] - center for k in keys}
+            touching = {k: self._box_surface_distance(src[k], half) <= self.box_grip_contact for k in keys}
+            faces = {}
+            if self.box_grip_mode == "sides":
+                if len(keys) == 2 and all(touching.values()):
+                    # the horizontal axis the hands straddle; the left hand takes the face on its own side
+                    gap = src[keys[0]] - src[keys[1]]
+                    axis = int(np.argmax(np.abs(gap[:2])))
+                    sign = 1.0 if gap[axis] >= 0 else -1.0
+                    faces = {keys[0]: (axis, sign), keys[1]: (axis, -sign)}
+            else:
+                for k in keys:
+                    if touching[k]:
+                        axis = int(np.argmax(np.abs(src[k]) / half))
+                        faces[k] = (axis, 1.0 if src[k][axis] >= 0 else -1.0)
+            for k, (axis, sign) in faces.items():
+                along = sign * (J_OC_dict[k][axis] @ dqa + p_OC_dict[k][axis] - center[axis])
+                _add_term("box_grip", self.box_grip_weight * cp.square(along - (half[axis] - self.box_grip_depth)))
+
         # Pelvis prior: the Laplacian objective leaves the absolute root pose in its null space, so the solver
         # could lean the pelvis back and cancel it with waist pitch. Anchoring the pelvis removes that freedom.
         if self.pelvis_track_weight > 0 and human_src_pts is not None:
@@ -1554,6 +1585,25 @@ class InteractionMeshRetargeter:
             bodies = [b for b in (self._body_id(n) for n in names) if b >= 0]
             self._foot_geoms = frozenset(np.flatnonzero(np.isin(self.robot_model.geom_bodyid, bodies)).tolist())
         return geom_id in self._foot_geoms
+
+    @staticmethod
+    def _box_surface_distance(point: np.ndarray, half: np.ndarray) -> float:
+        """Signed distance from a box-centered point to the surface of a box with these half extents (inside < 0)."""
+        excess = np.abs(point) - half
+        return float(np.linalg.norm(np.maximum(excess, 0.0)) + min(excess.max(), 0.0))
+
+    def _object_box(self) -> tuple[np.ndarray, np.ndarray]:
+        """Center and half extents of the object's mesh in its body frame, as the (possibly scaled) model has it."""
+        if self._box_local is None:
+            mesh = self.robot_model.mesh(f"{self.object_name}_mesh")
+            geom = next(g for g in range(self.robot_model.ngeom) if self.robot_model.geom_dataid[g] == mesh.id)
+            verts = self.robot_model.mesh_vert[mesh.vertadr[0] : mesh.vertadr[0] + mesh.vertnum[0]].astype(np.float64)
+            rot = np.zeros(9)
+            mujoco.mju_quat2Mat(rot, self.robot_model.geom_quat[geom])
+            pts = verts @ rot.reshape(3, 3).T + self.robot_model.geom_pos[geom]
+            lo, hi = pts.min(axis=0), pts.max(axis=0)
+            self._box_local = (0.5 * (lo + hi), 0.5 * (hi - lo))
+        return self._box_local
 
     @staticmethod
     def _point_jacobian(jac_pos: np.ndarray, jac_rot: np.ndarray, arm: np.ndarray) -> np.ndarray:

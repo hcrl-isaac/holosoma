@@ -1195,6 +1195,21 @@ def main(cfg: RetargetingConfig) -> None:
                 len(human_joints),
             )
 
+    if terms.box_grip_weight > 0 and task_type == "object_interaction":
+        retargeter.box_grip_weight = terms.box_grip_weight
+        retargeter.box_grip_depth = terms.box_grip_depth
+        retargeter.box_grip_contact = terms.box_grip_contact
+        retargeter.box_grip_keys = tuple(k.strip() for k in terms.box_grip_keys.split(",") if k.strip())
+        retargeter.box_grip_mode = terms.box_grip_mode
+        logger.info(
+            "Box grip (%s): weight %.0f, palms %.3f m inside the face within %.3f m of contact, keys %s",
+            retargeter.box_grip_mode,
+            retargeter.box_grip_weight,
+            retargeter.box_grip_depth,
+            retargeter.box_grip_contact,
+            retargeter.box_grip_keys,
+        )
+
     # Task-specific foot sticking adjustments
     if task_type == "object_interaction":
         # Disable initial sticking

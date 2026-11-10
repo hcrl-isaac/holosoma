@@ -111,6 +111,19 @@ class SolverTerms:
     ball_band: float | None = None
     ball_constraint: bool = False
 
+    # --- box grip (object interaction) ---
+    box_grip_weight: float = 0.0
+    """Hold each palm on the box face its source hand touches (0 = off); the source grasps are too loose to lift."""
+    box_grip_depth: float = 0.01
+    """How far inside the touched face the palm is held, m (a palm on the surface exerts no squeeze)."""
+    box_grip_contact: float = 0.05
+    """Source hand-to-box surface distance counted as touching, m (in the scaled solve frame)."""
+    box_grip_keys: str = "L_Wrist,R_Wrist"
+    """Source keypoints mapped to the robot palms (left first), comma-separated."""
+    box_grip_mode: Literal["touched", "sides"] = "touched"
+    """Hold each palm on the face its source hand touches, or, while both hands touch, both palms on opposite side faces
+    (the squeeze a fingerless hand needs)."""
+
     # --- solve / debug ---
     n_iter: int = 0
     """SQP iterations per frame (0 = the solver's default)."""
