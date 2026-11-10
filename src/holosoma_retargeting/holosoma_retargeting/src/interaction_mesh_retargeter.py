@@ -1308,9 +1308,9 @@ class InteractionMeshRetargeter:
         # squeeze. While a source hand touches a face, hold the palm a set depth inside that face, along its normal.
         if self.box_grip_weight > 0 and human_src_pts is not None and self.object_name != "ground" and not init_t:
             center, half = self._object_box()
-            keys = [k for k in self.box_grip_keys if k in J_OC_dict]
-            src = {k: human_src_pts[robot_link_keys.index(k)] - center for k in keys}
-            touching = {k: self._box_surface_distance(src[k], half) <= self.box_grip_contact for k in keys}
+            keys = [hand for hand in self.box_grip_keys if hand in J_OC_dict]
+            src = {hand: human_src_pts[robot_link_keys.index(hand)] - center for hand in keys}
+            touching = {hand: self._box_surface_distance(src[hand], half) <= self.box_grip_contact for hand in keys}
             faces = {}
             if self.box_grip_mode == "sides":
                 if len(keys) == 2 and all(touching.values()):
@@ -1320,12 +1320,12 @@ class InteractionMeshRetargeter:
                     sign = 1.0 if gap[axis] >= 0 else -1.0
                     faces = {keys[0]: (axis, sign), keys[1]: (axis, -sign)}
             else:
-                for k in keys:
-                    if touching[k]:
-                        axis = int(np.argmax(np.abs(src[k]) / half))
-                        faces[k] = (axis, 1.0 if src[k][axis] >= 0 else -1.0)
-            for k, (axis, sign) in faces.items():
-                along = sign * (J_OC_dict[k][axis] @ dqa + p_OC_dict[k][axis] - center[axis])
+                for hand in keys:
+                    if touching[hand]:
+                        axis = int(np.argmax(np.abs(src[hand]) / half))
+                        faces[hand] = (axis, 1.0 if src[hand][axis] >= 0 else -1.0)
+            for hand, (axis, sign) in faces.items():
+                along = sign * (J_OC_dict[hand][axis] @ dqa + p_OC_dict[hand][axis] - center[axis])
                 _add_term("box_grip", self.box_grip_weight * cp.square(along - (half[axis] - self.box_grip_depth)))
 
         # Pelvis prior: the Laplacian objective leaves the absolute root pose in its null space, so the solver
