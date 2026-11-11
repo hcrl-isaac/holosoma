@@ -122,6 +122,9 @@ class SolverTerms:
     """Source keypoints mapped to the robot palms (left first), comma-separated."""
     box_grip_lift: float = 0.0
     """With ``sides``, also hold the palms on the box while it is this far above its lowest height, m (0 = off)."""
+    box_grip_penetration: float = 0.0
+    """Depth the hands may sink into the object past the non-penetration tolerance, m: a palm stopped at the surface
+    exerts no squeeze."""
     box_grip_pad: int = 10
     """Frames the held span is widened by on each side, so the grasp forms before the lift and outlasts the set-down."""
     box_grip_mode: Literal["touched", "sides"] = "touched"

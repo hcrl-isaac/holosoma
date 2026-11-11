@@ -745,6 +745,8 @@ def main(cfg: RetargetingConfig) -> None:
     human_joints, object_poses, smpl_scale = load_motion_data(
         task_type, data_format, data_path, task_name, constants, cfg.motion_data_config
     )
+    # preprocessing moves the object into the solve frame; the held span reads its height above the source floor
+    source_object_z = np.asarray(object_poses)[:, 6].copy()
 
     # Get toe names from motion data config (depends only on data_format)
     toe_names = cfg.motion_data_config.toe_names
@@ -1201,8 +1203,9 @@ def main(cfg: RetargetingConfig) -> None:
         retargeter.box_grip_contact = terms.box_grip_contact
         retargeter.box_grip_keys = tuple(k.strip() for k in terms.box_grip_keys.split(",") if k.strip())
         retargeter.box_grip_mode = terms.box_grip_mode
+        retargeter.box_grip_penetration = terms.box_grip_penetration
         if terms.box_grip_lift > 0:
-            rise = object_poses[:, 6] - object_poses[:, 6].min()
+            rise = source_object_z - source_object_z.min()
             held = rise > terms.box_grip_lift
             pad = max(int(terms.box_grip_pad), 0)
             retargeter.box_grip_held = np.array(

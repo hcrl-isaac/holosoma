@@ -150,6 +150,8 @@ class InteractionMeshRetargeter:
         self.box_grip_contact = 0.05
         self.box_grip_keys: tuple[str, ...] = ("L_Wrist", "R_Wrist")
         self.box_grip_mode = "touched"
+        self.box_grip_penetration = 0.0
+        self._hand_object_bodies: tuple[frozenset[int], int] | None = None
         self.box_grip_held: np.ndarray | None = None  # (T,) frames the box must be held whatever the source hands do
         self._box_local: tuple[np.ndarray, np.ndarray] | None = None
         self.foot_orient_weight = 0.0  # stance-engagement foot angular-rate damping (0 = off, see _foot_orient_damp)
@@ -1034,7 +1036,10 @@ class InteractionMeshRetargeter:
         for key, phi in phis.items():
             Ja_n_full = Js[key]
             Ja_n = Ja_n_full[self.q_a_indices]
-            rhs = min(-phi - self.penetration_tolerance, 0.02)
+            tol = self.penetration_tolerance
+            if self.box_grip_penetration > 0 and self._is_hand_object_pair(key):
+                tol += self.box_grip_penetration
+            rhs = min(-phi - tol, 0.02)
             constraints += [Ja_n @ dqa >= rhs]
             # cushion: a body lying on the ground otherwise rides the hard boundary while the targets
             # pull it into the floor, and rocks as the active contact set switches
@@ -1589,6 +1594,18 @@ class InteractionMeshRetargeter:
             bodies = [b for b in (self._body_id(n) for n in names) if b >= 0]
             self._foot_geoms = frozenset(np.flatnonzero(np.isin(self.robot_model.geom_bodyid, bodies)).tolist())
         return geom_id in self._foot_geoms
+
+    def _is_hand_object_pair(self, key: tuple[int, int]) -> bool:
+        """Whether a contact pair is a hand geom against the manipulated object."""
+        if self._hand_object_bodies is None:
+            m = self.robot_model
+            hands = frozenset(
+                b for b in range(m.nbody) if "hand" in (mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b) or "")
+            )
+            self._hand_object_bodies = (hands, self._body_id(self.object_name))
+        hands, obj = self._hand_object_bodies
+        bodies = {int(self.robot_model.geom_bodyid[g]) for g in key}
+        return obj in bodies and bool(bodies & hands)
 
     @staticmethod
     def _box_surface_distance(point: np.ndarray, half: np.ndarray) -> float:
