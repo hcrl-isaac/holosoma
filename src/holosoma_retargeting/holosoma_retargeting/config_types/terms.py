@@ -120,6 +120,10 @@ class SolverTerms:
     """Source hand-to-box surface distance counted as touching, m (in the scaled solve frame)."""
     box_grip_keys: str = "L_Wrist,R_Wrist"
     """Source keypoints mapped to the robot palms (left first), comma-separated."""
+    box_grip_lift: float = 0.0
+    """With ``sides``, also hold the palms on the box while it is this far above its lowest height, m (0 = off)."""
+    box_grip_pad: int = 10
+    """Frames the held span is widened by on each side, so the grasp forms before the lift and outlasts the set-down."""
     box_grip_mode: Literal["touched", "sides"] = "touched"
     """Hold each palm on the face its source hand touches, or, while both hands touch, both palms on opposite side faces
     (the squeeze a fingerless hand needs)."""

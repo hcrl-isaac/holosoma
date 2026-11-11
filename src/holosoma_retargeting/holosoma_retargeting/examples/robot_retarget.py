@@ -1201,6 +1201,14 @@ def main(cfg: RetargetingConfig) -> None:
         retargeter.box_grip_contact = terms.box_grip_contact
         retargeter.box_grip_keys = tuple(k.strip() for k in terms.box_grip_keys.split(",") if k.strip())
         retargeter.box_grip_mode = terms.box_grip_mode
+        if terms.box_grip_lift > 0:
+            rise = object_poses[:, 6] - object_poses[:, 6].min()
+            held = rise > terms.box_grip_lift
+            pad = max(int(terms.box_grip_pad), 0)
+            retargeter.box_grip_held = np.array(
+                [held[max(0, t - pad) : t + pad + 1].any() for t in range(len(held))], dtype=bool
+            )
+            logger.info("Box grip held span: %d of %d frames", int(retargeter.box_grip_held.sum()), len(held))
         logger.info(
             "Box grip (%s): weight %.0f, palms %.3f m inside the face within %.3f m of contact, keys %s",
             retargeter.box_grip_mode,

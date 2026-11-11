@@ -150,6 +150,7 @@ class InteractionMeshRetargeter:
         self.box_grip_contact = 0.05
         self.box_grip_keys: tuple[str, ...] = ("L_Wrist", "R_Wrist")
         self.box_grip_mode = "touched"
+        self.box_grip_held: np.ndarray | None = None  # (T,) frames the box must be held whatever the source hands do
         self._box_local: tuple[np.ndarray, np.ndarray] | None = None
         self.foot_orient_weight = 0.0  # stance-engagement foot angular-rate damping (0 = off, see _foot_orient_damp)
         self.joint_limit_barrier_weight = 0.0  # one-sided hinge inside `margin` of an actuated stop
@@ -1313,7 +1314,10 @@ class InteractionMeshRetargeter:
             touching = {hand: self._box_surface_distance(src[hand], half) <= self.box_grip_contact for hand in keys}
             faces = {}
             if self.box_grip_mode == "sides":
-                if len(keys) == 2 and all(touching.values()):
+                held = self.box_grip_held is not None and bool(
+                    self.box_grip_held[min(frame_idx, len(self.box_grip_held) - 1)]
+                )
+                if len(keys) == 2 and (all(touching.values()) or held):
                     # the horizontal axis the hands straddle; the left hand takes the face on its own side
                     gap = src[keys[0]] - src[keys[1]]
                     axis = int(np.argmax(np.abs(gap[:2])))
