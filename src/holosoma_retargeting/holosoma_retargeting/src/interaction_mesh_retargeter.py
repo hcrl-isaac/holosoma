@@ -1602,7 +1602,9 @@ class InteractionMeshRetargeter:
             hands = frozenset(
                 b for b in range(m.nbody) if "hand" in (mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b) or "")
             )
-            self._hand_object_bodies = (hands, self._body_id(self.object_name))
+            mesh = m.mesh(f"{self.object_name}_mesh").id
+            obj = int(m.geom_bodyid[next(g for g in range(m.ngeom) if m.geom_dataid[g] == mesh)])
+            self._hand_object_bodies = (hands, obj)
         hands, obj = self._hand_object_bodies
         bodies = {int(self.robot_model.geom_bodyid[g]) for g in key}
         return obj in bodies and bool(bodies & hands)
