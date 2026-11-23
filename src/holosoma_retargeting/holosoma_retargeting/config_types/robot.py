@@ -18,6 +18,7 @@ class RobotDefaults(TypedDict):
 _ROBOT_DEFAULTS: dict[str, RobotDefaults] = {
     "g1": {"robot_dof": 29, "robot_height": 1.32, "object_name": "ground"},
     "t1": {"robot_dof": 23, "robot_height": 1.2, "object_name": "ground"},
+    "t2": {"robot_dof": 31, "robot_height": 1.4, "object_name": "ground"},
 }
 
 
@@ -157,6 +158,8 @@ class RobotConfig:
                 "left_foot_sphere_5_link",
                 "right_foot_sphere_5_link",
             ]
+        if self.robot_type == "t2":
+            return [f"{side}_foot_sphere_{i}_link" for i in range(1, 6) for side in ("left", "right")]
         raise ValueError(f"Invalid robot type: {self.robot_type}")
 
     FOOT_STICKING_LINKS = property(
@@ -176,6 +179,8 @@ class RobotConfig:
                 side: [f"{side.capitalize()}_Ankle_Pitch", f"{side.capitalize()}_Ankle_Roll"]
                 for side in ("left", "right")
             }
+        if self.robot_type == "t2":
+            return {side: [f"{side}_ankle_pitch_joint", f"{side}_ankle_roll_joint"] for side in ("left", "right")}
         raise ValueError(f"Invalid robot type: {self.robot_type}")
 
     ANKLE_JOINTS = property(
@@ -190,7 +195,7 @@ class RobotConfig:
 
         if self.robot_type == "g1":
             return {side: [f"{side}_ankle_roll_sphere_{i}_link" for i in range(1, 6)] for side in ("left", "right")}
-        if self.robot_type == "t1":
+        if self.robot_type in ("t1", "t2"):
             return {side: [f"{side}_foot_sphere_{i}_link" for i in range(1, 6)] for side in ("left", "right")}
         raise ValueError(f"Invalid robot type: {self.robot_type}")
 
@@ -208,6 +213,8 @@ class RobotConfig:
             return {side: f"{side}_ankle_roll_link" for side in ("left", "right")}
         if self.robot_type == "t1":
             return {side: f"{side}_foot_link" for side in ("left", "right")}
+        if self.robot_type == "t2":
+            return {side: f"{side}_ankle_roll_link" for side in ("left", "right")}
         raise ValueError(f"Invalid robot type: {self.robot_type}")
 
     FOOT_LINKS = property(
@@ -292,6 +299,8 @@ class RobotConfig:
             return np.arange(19)
         if self.robot_type == "t1":  # floating base + the 12 leg joints (qpos 18..29), as for the G1
             return np.concatenate([np.arange(7), np.arange(18, 30)])
+        if self.robot_type == "t2":  # floating base + the 12 leg joints (qpos 26..37)
+            return np.concatenate([np.arange(7), np.arange(26, 38)])
         # Default: return empty array if robot type not defined (nominal tracking not used)
         return np.array([], dtype=int)
 

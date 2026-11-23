@@ -33,11 +33,12 @@ from holosoma_retargeting.config_types.retargeting import RetargetingConfig  # n
 from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
 from holosoma_retargeting.config_types.task import TaskConfig  # noqa: E402
 from holosoma_retargeting.config_types.terms import SolverTerms, preset_terms  # noqa: E402
+from holosoma_retargeting.config_values.joint_roles import JOINT_ROLES  # noqa: E402
 from holosoma_retargeting.src import ball_contact  # noqa: E402
 from holosoma_retargeting.src.interaction_mesh_retargeter import (  # noqa: E402
     InteractionMeshRetargeter,  # type: ignore[import-not-found]
 )
-from holosoma_retargeting.src.source_angles import t1_joint_angle_targets  # noqa: E402
+from holosoma_retargeting.src.source_angles import joint_angle_targets  # noqa: E402
 from holosoma_retargeting.src.utils import (  # noqa: E402
     augment_object_poses,
     calculate_scale_factor,
@@ -755,32 +756,37 @@ def main(cfg: RetargetingConfig) -> None:
     retargeter.teleport_guard = terms.teleport_guard
     if not terms.foot_sticking:
         retargeter.activate_foot_sticking = False
-    # the G1 config's hand-tuned regularizers translated to the T1: a waist posture cost, and elbow
+    roles = JOINT_ROLES.get(robot)
+    # the G1 config's hand-tuned regularizers translated to the T1 and T2: a waist posture cost, and elbow
     # flexion capped to the same 2/3 of its range the G1's elbow gets
-    if terms.t1_manual and robot == "t1":
-        _rows = retargeter._resolve_joint_rows(("Waist",))
+    if terms.manual_posture and roles is not None:
+        _rows = retargeter._resolve_joint_rows(roles["waist"])
         retargeter.Q_diag[_rows] = terms.waist_cost
         # hip yaw's axis is nearly collinear with the thigh, so keypoints barely observe it
         _hy = terms.hip_yaw_cost
         if _hy > 0:
-            retargeter.Q_diag[retargeter._resolve_joint_rows(("Left_Hip_Yaw", "Right_Hip_Yaw"))] = _hy
+            retargeter.Q_diag[retargeter._resolve_joint_rows(roles["hip_yaw"])] = _hy
         # Shoulder_Pitch runs to -190 deg, so a hand in front is also reachable with the arm swung over
         # the back, and a posture cost makes that branch pay
         _sc = terms.shoulder_cost
         if _sc > 0:
-            retargeter.Q_diag[retargeter._resolve_joint_rows(("Left_Shoulder_Pitch", "Right_Shoulder_Pitch"))] = _sc
+            retargeter.Q_diag[retargeter._resolve_joint_rows(roles["shoulder_pitch"])] = _sc
         # Elbow_Pitch is the upper-arm twist: same hand position with the elbow apex either way
         _tw = terms.twist_cost
         if _tw > 0:
-            retargeter.Q_diag[retargeter._resolve_joint_rows(("Left_Elbow_Pitch", "Right_Elbow_Pitch"))] = _tw
+            retargeter.Q_diag[retargeter._resolve_joint_rows(roles["twist"])] = _tw
+        # the T2's wrists sit past the last keypoint, so only this cost holds them
+        if terms.wrist_cost > 0 and roles["wrist"]:
+            retargeter.Q_diag[retargeter._resolve_joint_rows(roles["wrist"])] = terms.wrist_cost
         _cap = terms.elbow_cap
         if _cap is not None:
-            _left = retargeter._resolve_joint_rows(("Left_Elbow_Yaw",))
-            _right = retargeter._resolve_joint_rows(("Right_Elbow_Yaw",))
+            _left = retargeter._resolve_joint_rows(roles["elbow"][:1])
+            _right = retargeter._resolve_joint_rows(roles["elbow"][1:])
             retargeter.q_a_lb[_left] = np.maximum(retargeter.q_a_lb[_left], -_cap)
             retargeter.q_a_ub[_right] = np.minimum(retargeter.q_a_ub[_right], _cap)
         logger.info(
-            "T1 manual regularizers: waist cost %.2f, elbow flexion cap %s",
+            "%s manual regularizers: waist cost %.2f, elbow flexion cap %s",
+            robot.upper(),
             retargeter.Q_diag[_rows][0],
             "the robot limit" if _cap is None else f"{_cap:.2f}",
         )
@@ -805,7 +811,7 @@ def main(cfg: RetargetingConfig) -> None:
     # elbow-swivel solutions in one frame
     _tws = terms.twist_smooth
     if _tws > 0 and retargeter.q_a_init_idx == -7:
-        _smooth_rows(retargeter)[retargeter._resolve_joint_rows(("Left_Elbow_Pitch", "Right_Elbow_Pitch"))] = _tws
+        _smooth_rows(retargeter)[retargeter._resolve_joint_rows(roles["twist"] if roles else ())] = _tws
         logger.info("Twist-joint smoothing weight: %.1f", _tws)
 
     # self-collision shaping: per-iteration escape cap, soft margin repulsion
@@ -820,14 +826,13 @@ def main(cfg: RetargetingConfig) -> None:
     retargeter.body_contact_root = terms.body_contact_root
     # straight-arm twist prior: weight fades to zero once the source elbow bends past ~25 deg
     _tp = terms.straight_twist_weight
-    if _tp > 0 and robot == "t1":
-        _ang = t1_joint_angle_targets(human_joints, retargeter.demo_joints)
-        if "Left_Elbow_Yaw" in _ang and "Right_Elbow_Yaw" in _ang:
-            _bend = np.stack([np.abs(_ang["Left_Elbow_Yaw"]), np.abs(_ang["Right_Elbow_Yaw"])], 1)
+    if _tp > 0 and roles is not None:
+        _ang = joint_angle_targets(human_joints, retargeter.demo_joints, robot)
+        _el, _er = roles["elbow"]
+        if _el in _ang and _er in _ang:
+            _bend = np.stack([np.abs(_ang[_el]), np.abs(_ang[_er])], 1)
             retargeter.twist_prior_seq = _tp * np.clip(1.0 - np.degrees(_bend) / 25.0, 0.0, 1.0)
-            retargeter.twist_rows = [
-                int(retargeter._resolve_joint_rows((n,))[0]) for n in ("Left_Elbow_Pitch", "Right_Elbow_Pitch")
-            ]
+            retargeter.twist_rows = [int(retargeter._resolve_joint_rows((n,))[0]) for n in roles["twist"]]
             logger.info(
                 "Straight-arm twist prior: w=%.1f, active on %.0f%% of frames",
                 _tp,
@@ -856,22 +861,23 @@ def main(cfg: RetargetingConfig) -> None:
     # shoulder pitch/roll can overshoot the source arm's angular rate on fast arm motion
     _shs = terms.shoulder_smooth
     if _shs > 0 and retargeter.q_a_init_idx == -7:
-        _shoulders = ("Left_Shoulder_Pitch", "Left_Shoulder_Roll", "Right_Shoulder_Pitch", "Right_Shoulder_Roll")
+        _shoulders = roles["shoulders"] if roles else ()
         _smooth_rows(retargeter)[retargeter._resolve_joint_rows(_shoulders)] = _shs
         logger.info("Shoulder smoothing weight: %.1f", _shs)
 
     _jaw = terms.joint_angle_weight
-    if _jaw > 0 and robot == "t1":
+    if _jaw > 0 and roles is not None:
         retargeter.joint_angle_weight = _jaw
-        retargeter.joint_angle_targets = t1_joint_angle_targets(human_joints, retargeter.demo_joints)
+        retargeter.joint_angle_targets = joint_angle_targets(human_joints, retargeter.demo_joints, robot)
         # no keypoint observes the head (its joints lie on the neck axis), so lafan_source writes its angles
         _head = Path(data_path) / f"{task_name}_head.npy"
         if data_format == "lafan" and _head.exists():
             _yaw_pitch = np.load(_head)
             if len(_yaw_pitch) != len(human_joints):
                 raise ValueError(f"{_head.name} has {len(_yaw_pitch)} frames but the source has {len(human_joints)}")
-            retargeter.joint_angle_targets["AAHead_yaw"] = _yaw_pitch[:, 0]
-            retargeter.joint_angle_targets["Head_pitch"] = _yaw_pitch[:, 1]
+            _head_yaw, _head_pitch = roles["head"]
+            retargeter.joint_angle_targets[_head_yaw] = _yaw_pitch[:, 0]
+            retargeter.joint_angle_targets[_head_pitch] = _yaw_pitch[:, 1]
         if retargeter.joint_angle_targets:
             _m = {k: round(float(np.abs(v).mean()), 2) for k, v in retargeter.joint_angle_targets.items()}
             logger.info("Joint-angle tracking w=%.1f, source |angle| means: %s", _jaw, _m)

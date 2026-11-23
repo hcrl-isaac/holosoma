@@ -11,13 +11,26 @@ from collections.abc import Sequence
 
 import numpy as np
 
-# each T1 hinge's (proximal, hinge, distal) source joints under their SMPL and LAFAN/mocap names, and the
-# sign that maps the interior bend onto the joint's range (Elbow_Yaw is one-sided, negative on the left)
-T1_HINGES = {
-    "Left_Elbow_Yaw": ((("L_Shoulder", "LeftArm"), ("L_Elbow", "LeftForeArm"), ("L_Wrist", "LeftHand")), -1.0),
-    "Right_Elbow_Yaw": ((("R_Shoulder", "RightArm"), ("R_Elbow", "RightForeArm"), ("R_Wrist", "RightHand")), 1.0),
-    "Left_Knee_Pitch": ((("L_Hip", "LeftUpLeg"), ("L_Knee", "LeftLeg"), ("L_Ankle", "LeftFoot")), 1.0),
-    "Right_Knee_Pitch": ((("R_Hip", "RightUpLeg"), ("R_Knee", "RightLeg"), ("R_Ankle", "RightFoot")), 1.0),
+_ELBOW_L = (("L_Shoulder", "LeftArm"), ("L_Elbow", "LeftForeArm"), ("L_Wrist", "LeftHand"))
+_ELBOW_R = (("R_Shoulder", "RightArm"), ("R_Elbow", "RightForeArm"), ("R_Wrist", "RightHand"))
+_KNEE_L = (("L_Hip", "LeftUpLeg"), ("L_Knee", "LeftLeg"), ("L_Ankle", "LeftFoot"))
+_KNEE_R = (("R_Hip", "RightUpLeg"), ("R_Knee", "RightLeg"), ("R_Ankle", "RightFoot"))
+
+# per robot, each hinge's (proximal, hinge, distal) source joints under their SMPL and LAFAN/mocap names, and the
+# sign that maps the interior bend onto the joint's range (both robots' elbow flexion is negative on the left)
+HINGES = {
+    "t1": {
+        "Left_Elbow_Yaw": (_ELBOW_L, -1.0),
+        "Right_Elbow_Yaw": (_ELBOW_R, 1.0),
+        "Left_Knee_Pitch": (_KNEE_L, 1.0),
+        "Right_Knee_Pitch": (_KNEE_R, 1.0),
+    },
+    "t2": {
+        "left_elbow_yaw_joint": (_ELBOW_L, -1.0),
+        "right_elbow_yaw_joint": (_ELBOW_R, 1.0),
+        "left_knee_pitch_joint": (_KNEE_L, 1.0),
+        "right_knee_pitch_joint": (_KNEE_R, 1.0),
+    },
 }
 
 
@@ -39,20 +52,21 @@ def _bend(p: np.ndarray, a: int, b: int, c: int) -> np.ndarray:
     return np.arccos(np.clip(cos, -1.0, 1.0))
 
 
-def t1_joint_angle_targets(joints: np.ndarray, demo_joints: Sequence[str]) -> dict[str, np.ndarray]:
-    """Target angles for T1's flexion hinges whose three source joints ``demo_joints`` names.
+def joint_angle_targets(joints: np.ndarray, demo_joints: Sequence[str], robot: str = "t1") -> dict[str, np.ndarray]:
+    """Target angles for a robot's flexion hinges whose three source joints ``demo_joints`` names.
 
     Args:
         joints: ``(T, J, 3)`` source joint positions, any consistent scale.
         demo_joints: Name of each of the ``J`` source joints.
+        robot: A ``HINGES`` robot type.
 
     Returns:
-        Mapping of T1 joint name to a ``(T,)`` target angle track; a hinge the source lacks is absent.
+        Mapping of robot joint name to a ``(T,)`` target angle track; a hinge the source lacks is absent.
     """
     index = {name: i for i, name in enumerate(demo_joints)}
     targets = {}
-    for t1_joint, (chain, sign) in T1_HINGES.items():
+    for joint, (chain, sign) in HINGES[robot].items():
         found = [next((index[n] for n in spellings if n in index), -1) for spellings in chain]
         if min(found) >= 0:
-            targets[t1_joint] = sign * _bend(joints, *found)
+            targets[joint] = sign * _bend(joints, *found)
     return targets

@@ -16,7 +16,7 @@ from holosoma_retargeting.data_utils import amass_source, smpl_fk
 from holosoma_retargeting.src import stance_windows
 from holosoma_retargeting.src.interaction_mesh_retargeter import InteractionMeshRetargeter
 from holosoma_retargeting.src.limb_retarget import rescale_to_robot_limbs
-from holosoma_retargeting.src.source_angles import t1_joint_angle_targets
+from holosoma_retargeting.src.source_angles import joint_angle_targets
 
 T1_MODEL = Path(__file__).resolve().parents[1] / "holosoma_retargeting" / "models" / "t1" / "t1_23dof.xml"
 
@@ -98,7 +98,7 @@ def test_limb_rescale_keeps_a_horizontal_segments_drop():
 @pytest.mark.parametrize("fmt", sorted(DEMO_JOINTS_REGISTRY))
 def test_joint_angle_hinges_resolve_by_name(fmt):
     names = DEMO_JOINTS_REGISTRY[fmt]
-    targets = t1_joint_angle_targets(np.random.default_rng(0).normal(size=(3, len(names), 3)), names)
+    targets = joint_angle_targets(np.random.default_rng(0).normal(size=(3, len(names), 3)), names)
     hinges = {"Left_Elbow_Yaw", "Right_Elbow_Yaw", "Left_Knee_Pitch", "Right_Knee_Pitch"}
     assert set(targets) == (set() if fmt == "g1fk" else hinges)
 
@@ -106,7 +106,7 @@ def test_joint_angle_hinges_resolve_by_name(fmt):
 def test_a_right_angle_elbow_reads_pi_over_two_signed_to_its_range():
     names = ["L_Shoulder", "L_Elbow", "L_Wrist", "R_Shoulder", "R_Elbow", "R_Wrist"]
     joints = np.array([[[0, 0, 0], [0, 0, -1], [1, 0, -1], [0, 0, 0], [0, 0, -1], [1, 0, -1]]], dtype=float)
-    targets = t1_joint_angle_targets(joints, names)
+    targets = joint_angle_targets(joints, names)
     assert targets["Left_Elbow_Yaw"][0] == pytest.approx(-np.pi / 2)
     assert targets["Right_Elbow_Yaw"][0] == pytest.approx(np.pi / 2)
 

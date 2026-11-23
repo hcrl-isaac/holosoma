@@ -230,6 +230,26 @@ JOINTS_MAPPINGS = {
         "LeftHand": "left_hand_sphere_link",
         "RightHand": "right_hand_sphere_link",
     },
+    # T2: the root (trunk) sits 0.26 m above the hips with the waist chain below it, so the pelvis keypoint is
+    # waist_yaw_link (0.09 m above the hips) and Spine2 anchors the chest; elbow flexion hinges at *_elbow_yaw_link.
+    ("lafan", "t2"): {
+        "Spine1": "waist_yaw_link",
+        "Spine2": "trunk",
+        "LeftUpLeg": "left_hip_pitch_link",
+        "RightUpLeg": "right_hip_pitch_link",
+        "LeftLeg": "left_knee_pitch_link",
+        "RightLeg": "right_knee_pitch_link",
+        "LeftFoot": "left_ankle_pitch_link",
+        "RightFoot": "right_ankle_pitch_link",
+        "LeftToeBase": "left_foot_sphere_5_link",
+        "RightToeBase": "right_foot_sphere_5_link",
+        "LeftArm": "left_shoulder_roll_link",
+        "RightArm": "right_shoulder_roll_link",
+        "LeftForeArm": "left_elbow_yaw_link",
+        "RightForeArm": "right_elbow_yaw_link",
+        "LeftHand": "left_wrist_pitch_link",
+        "RightHand": "right_wrist_pitch_link",
+    },
     ("smplh", "g1"): {
         "Pelvis": "pelvis_contour_link",
         "L_Hip": "left_hip_pitch_link",
@@ -380,6 +400,11 @@ DATA_FORMAT_CONSTANTS: dict[str, FormatConstants] = {
     },
 }
 
+ROBOT_SCALE_FACTORS: dict[tuple[str, str], float] = {
+    ("lafan", "t2"): 0.78,  # T2 hip-to-ankle 0.68 m over LAFAN1's 0.86 m
+}
+"""Source scale for a (format, robot) whose legs the format's default scale misfits."""
+
 # Unified registry: Maps format name to demo joints
 # This is the SINGLE PLACE to add new formats - just add an entry here!
 # No need to update any Literal types - DataFormat is now str with runtime validation
@@ -464,6 +489,8 @@ class MotionDataConfig:
     @property
     def default_scale_factor(self) -> float | None:
         """Get default scale factor for this data format (None if calculated per subject)."""
+        if (self.data_format, self.robot_type) in ROBOT_SCALE_FACTORS:
+            return ROBOT_SCALE_FACTORS[(self.data_format, self.robot_type)]
         format_constants: FormatConstants = DATA_FORMAT_CONSTANTS.get(self.data_format, {})
         return format_constants.get("default_scale_factor")
 

@@ -57,14 +57,16 @@ class SolverTerms:
     joint_limit_margin_frac: float = 0.15
     joint_limit_joints: str = ""
     """Comma-separated joints the barrier is restricted to (empty = all)."""
-    t1_manual: bool = False
-    """T1 posture costs and range caps (the G1 config's hand-tuned regularizers, translated)."""
+    manual_posture: bool = False
+    """Posture costs and range caps on the T1/T2 joint roles (the G1 config's hand-tuned regularizers, translated)."""
     waist_cost: float = 0.2
     hip_yaw_cost: float = 0.0
     shoulder_cost: float = 0.0
     twist_cost: float = 0.0
+    wrist_cost: float = 0.0
+    """Posture cost on wrist joints no keypoint observes (the T2's three per arm)."""
     elbow_cap: float | None = None
-    """Elbow flexion cap (rad) under ``t1_manual`` that only tightens the robot config's 2.27; None keeps it."""
+    """Elbow flexion cap (rad) under ``manual_posture`` that only tightens the robot's range; None keeps it."""
     straight_twist_weight: float = 0.0
     """Posture cost on the upper-arm twist while the source elbow is nearly straight."""
 

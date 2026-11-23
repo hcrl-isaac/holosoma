@@ -1,4 +1,4 @@
-"""Named solver-term presets: the two validated T1 routes."""
+"""Named solver-term presets: the two validated T1 routes, and the T2 keypoint route."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ _T1_COMMON = {
     "self_collision_escape": 0.005,
     "foot_stack_clearance": 0.03,
     "foot_stack_weight": 2000.0,
-    "t1_manual": True,
+    "manual_posture": True,
     "hip_yaw_cost": 0.5,
     "shoulder_cost": 0.5,
     "twist_cost": 0.0,
@@ -26,6 +26,17 @@ PRESETS: dict[str, dict] = {
     # keypoint + joint-angle tracking on top of the mesh, for non-manipulation corpora (AMASS)
     "t1_keypoint": dict(
         _T1_COMMON,
+        keypoint_weight=50.0,
+        joint_angle_weight=20.0,
+        root_smooth=20.0,
+        accel_damp=3.0,
+        body_contact_gain=1.5,
+    ),
+    # the T1 keypoint route on the T2: feet self-collide by their ankle roll links, wrists held by a posture cost
+    "t2_keypoint": dict(
+        _T1_COMMON,
+        self_collision="left_ankle_roll_link:right_ankle_roll_link",
+        wrist_cost=0.5,
         keypoint_weight=50.0,
         joint_angle_weight=20.0,
         root_smooth=20.0,
