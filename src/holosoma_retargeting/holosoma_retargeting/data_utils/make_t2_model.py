@@ -1,7 +1,7 @@
 """Write holosoma's T2 retarget model (MJCF + URDF) from booster_assets ``robots/T2/T2_31dof``.
 
-Adds the sole spheres and palm points the solver keys on, and unnames the free joint, since joint limits are read
-from named joints only.
+Adds the sole spheres and palm points the solver keys on, unnames the free joint (joint limits are read from named
+joints only) and names the floor ``ground`` (the ground constraints find it by name).
 
     python -m holosoma_retargeting.data_utils.make_t2_model <booster_assets>/robots/T2/T2_31dof models/t2
 """
@@ -55,6 +55,10 @@ def main(src: str, dst: str) -> None:
     for j in r.iter("joint"):
         if j.get("type") == "free":
             j.attrib.pop("name", None)
+    # the solver's ground constraints find the floor by a geom name containing "ground"
+    for g in r.iter("geom"):
+        if g.get("name") == "floor":
+            g.set("name", "ground")
     for name, parent, pos in EXTRA:
         b = ET.SubElement(bodies[parent], "body", name=name, pos=fmt(pos))
         ET.SubElement(b, "inertial", pos="0 0 0", mass="0.001", diaginertia="1e-7 1e-7 1e-7")
