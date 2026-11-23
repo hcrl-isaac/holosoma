@@ -25,7 +25,10 @@ def spheres(side):
 
 
 EXTRA = spheres("left") + spheres("right")
-fmt = lambda p: " ".join(f"{v:g}" for v in p)
+
+
+def fmt(p: tuple) -> str:
+    return " ".join(f"{v:g}" for v in p)
 
 
 def _indent(elem: ET.Element, level: int = 0) -> None:
@@ -44,7 +47,7 @@ def _indent(elem: ET.Element, level: int = 0) -> None:
 
 def main(src: str, dst: str) -> None:
     # MJCF
-    t = ET.parse(f"{src}/T2_31dof.xml")
+    t = ET.parse(f"{src}/T2_31dof.xml")  # noqa: S314 (booster_assets, a pinned local checkout)
     r = t.getroot()
     r.set("model", "t2_31dof")
     bodies = {b.get("name"): b for b in r.iter("body")}
@@ -64,16 +67,16 @@ def main(src: str, dst: str) -> None:
         f.write("\n")
 
     # URDF
-    t = ET.parse(f"{src}/T2_31dof.urdf")
+    t = ET.parse(f"{src}/T2_31dof.urdf")  # noqa: S314
     r = t.getroot()
     r.set("name", "t2_31dof")
     for name, parent, pos in EXTRA:
-        l = ET.SubElement(r, "link", name=name)
-        i = ET.SubElement(l, "inertial")
+        link = ET.SubElement(r, "link", name=name)
+        i = ET.SubElement(link, "inertial")
         ET.SubElement(i, "origin", xyz="0 0 0", rpy="0 0 0")
         ET.SubElement(i, "mass", value="0.001")
         ET.SubElement(i, "inertia", ixx="1e-7", ixy="0", ixz="0", iyy="1e-7", iyz="0", izz="1e-7")
-        c = ET.SubElement(l, "collision")
+        c = ET.SubElement(link, "collision")
         ET.SubElement(c, "origin", xyz="0 0 0", rpy="0 0 0")
         ET.SubElement(ET.SubElement(c, "geometry"), "sphere", radius=f"{R}")
         j = ET.SubElement(r, "joint", name=name.replace("_link", "_joint"), type="fixed")
