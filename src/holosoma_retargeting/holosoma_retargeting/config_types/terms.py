@@ -29,6 +29,8 @@ class SolverTerms:
     """Scale the object's whole position with the human; off keeps its absolute height (object tasks)."""
     object_scale_with_human: bool = False
     """Shrink the object with the human too, so the robot reproduces a uniformly scaled scene (implies full scale)."""
+    object_box_collision: bool = False
+    """Collide with the object as the box bounding its mesh: mesh-mesh distances miss deep overlap, so hands sink in."""
 
     # --- tracking terms ---
     laplacian_weight: float | None = None

@@ -1602,8 +1602,7 @@ class InteractionMeshRetargeter:
             hands = frozenset(
                 b for b in range(m.nbody) if "hand" in (mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b) or "")
             )
-            mesh = m.mesh(f"{self.object_name}_mesh").id
-            obj = int(m.geom_bodyid[next(g for g in range(m.ngeom) if m.geom_dataid[g] == mesh)])
+            obj = int(m.geom_bodyid[self._object_geom()])
             self._hand_object_bodies = (hands, obj)
         hands, obj = self._hand_object_bodies
         bodies = {int(self.robot_model.geom_bodyid[g]) for g in key}
@@ -1615,11 +1614,21 @@ class InteractionMeshRetargeter:
         excess = np.abs(point) - half
         return float(np.linalg.norm(np.maximum(excess, 0.0)) + min(excess.max(), 0.0))
 
+    def _object_geom(self) -> int:
+        """The manipulated object's geom: the one referencing its mesh, or its box stand-in (same name)."""
+        m = self.robot_model
+        mesh = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_MESH, f"{self.object_name}_mesh")
+        by_mesh = [g for g in range(m.ngeom) if mesh >= 0 and m.geom_dataid[g] == mesh]
+        return by_mesh[0] if by_mesh else mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, self.object_name)
+
     def _object_box(self) -> tuple[np.ndarray, np.ndarray]:
         """Center and half extents of the object's mesh in its body frame, as the (possibly scaled) model has it."""
         if self._box_local is None:
+            geom = self._object_geom()
+            if self.robot_model.geom_type[geom] == mujoco.mjtGeom.mjGEOM_BOX:
+                self._box_local = (self.robot_model.geom_pos[geom].copy(), self.robot_model.geom_size[geom].copy())
+                return self._box_local
             mesh = self.robot_model.mesh(f"{self.object_name}_mesh")
-            geom = next(g for g in range(self.robot_model.ngeom) if self.robot_model.geom_dataid[g] == mesh.id)
             verts = self.robot_model.mesh_vert[mesh.vertadr[0] : mesh.vertadr[0] + mesh.vertnum[0]].astype(np.float64)
             rot = np.zeros(9)
             mujoco.mju_quat2Mat(rot, self.robot_model.geom_quat[geom])

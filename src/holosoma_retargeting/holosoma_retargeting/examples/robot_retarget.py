@@ -310,7 +310,9 @@ def load_motion_data(
     return human_joints, object_poses, smpl_scale
 
 
-def write_scaled_object_models(constants: SimpleNamespace, scale: float) -> tuple[str, str]:
+def write_scaled_object_models(
+    constants: SimpleNamespace, scale: float, box_collision: bool = False
+) -> tuple[str, str]:
     """Write copies of the object urdf and the robot+object scene xml with the object mesh scaled by ``scale``.
 
     The copies go to a fresh temp dir, since the model tree may be read-only, with their mesh paths made absolute.
@@ -342,7 +344,31 @@ def write_scaled_object_models(constants: SimpleNamespace, scale: float) -> tupl
     scene = re.sub(r'meshdir="([^"/][^"]*)"', lambda m: f'meshdir="{scene_src.parent / m.group(1)}"', scene)
     scene_dst = out / scene_src.name
     scene_dst.write_text(scene)
+    if box_collision:
+        box_object_geom(scene_dst, constants.OBJECT_NAME)
     return str(urdf_dst), str(scene_dst)
+
+
+def box_object_geom(scene: Path, name: str) -> None:
+    """Replace the object's mesh geom in a scene xml, in place, by the box bounding the mesh in its body frame.
+
+    Args:
+        scene: The scene xml, rewritten.
+        name: The object name; its geom references the ``<name>_mesh`` asset.
+    """
+    model = mujoco.MjModel.from_xml_path(str(scene))
+    mesh = model.mesh(f"{name}_mesh")
+    geom = next(g for g in range(model.ngeom) if model.geom_dataid[g] == mesh.id)
+    verts = model.mesh_vert[mesh.vertadr[0] : mesh.vertadr[0] + mesh.vertnum[0]].astype(np.float64)
+    rot = np.zeros(9)
+    mujoco.mju_quat2Mat(rot, model.geom_quat[geom])
+    pts = verts @ rot.reshape(3, 3).T + model.geom_pos[geom]
+    lo, hi = pts.min(axis=0), pts.max(axis=0)
+    spec = mujoco.MjSpec.from_file(str(scene))
+    g = next(g for g in spec.geoms if g.meshname == f"{name}_mesh")
+    g.type, g.meshname = mujoco.mjtGeom.mjGEOM_BOX, ""
+    g.size, g.pos, g.quat = 0.5 * (hi - lo), 0.5 * (lo + hi), [1.0, 0.0, 0.0, 0.0]
+    scene.write_text(spec.to_xml())
 
 
 def setup_object_data(
@@ -354,6 +380,7 @@ def setup_object_data(
     augmentation: bool,
     object_scale_augmented: np.ndarray | None = None,
     scale_with_human: bool = False,
+    box_collision: bool = False,
 ) -> tuple[np.ndarray | None, np.ndarray | None, str | None]:
     """Setup object-specific data (ground, object mesh, climbing terrain).
     Args:
@@ -365,6 +392,7 @@ def setup_object_data(
         augmentation: Whether augmentation is enabled
         object_scale_augmented: Scale factor for augmented objects (default: [1.0, 1.0, 1.2])
         scale_with_human: Give the robot the object shrunk by ``smpl_scale`` (object interaction).
+        box_collision: With ``scale_with_human``, collide with the object as its mesh's bounding box.
     Returns:
         Tuple of (object_local_pts, object_local_pts_demo, object_urdf_path)
     """
@@ -388,7 +416,7 @@ def setup_object_data(
         )
         if not scale_with_human:
             return object_local_pts, object_local_pts_demo, constants.OBJECT_URDF_FILE
-        urdf, scene = write_scaled_object_models(constants, smpl_scale)
+        urdf, scene = write_scaled_object_models(constants, smpl_scale, box_collision)
         constants.SCENE_XML_FILE = scene
         return object_local_pts_demo, object_local_pts_demo, urdf
 
@@ -761,6 +789,7 @@ def main(cfg: RetargetingConfig) -> None:
         cfg.augmentation,
         object_scale_augmented=_OBJECT_SCALE_AUGMENTED,
         scale_with_human=cfg.terms.object_scale_with_human,
+        box_collision=cfg.terms.object_box_collision,
     )
 
     # Create retargeter
