@@ -151,6 +151,8 @@ class InteractionMeshRetargeter:
         self.box_grip_keys: tuple[str, ...] = ("L_Wrist", "R_Wrist")
         self.box_grip_mode = "touched"
         self.box_grip_penetration = 0.0
+        self.object_slack_weight = 0.0  # 0 = hard robot-object non-penetration
+        self.object_clearance = 0.0
         self._hand_object_bodies: tuple[frozenset[int], int] | None = None
         self.box_grip_held: np.ndarray | None = None  # (T,) frames the box must be held whatever the source hands do
         self._box_local: tuple[np.ndarray, np.ndarray] | None = None
@@ -1033,14 +1035,23 @@ class InteractionMeshRetargeter:
             and not any(self._is_foot_geom(g) for g in key)
         )
         contact_gain = 1.0 + self.body_contact_gain * n_body_ground
+        obj_slacks = []
         for key, phi in phis.items():
             Ja_n_full = Js[key]
             Ja_n = Ja_n_full[self.q_a_indices]
             tol = self.penetration_tolerance
             if self.box_grip_penetration > 0 and self._is_hand_object_pair(key):
                 tol += self.box_grip_penetration
+            on_object = any(self.object_name in self._geom_names[g] for g in key)
+            if on_object:
+                tol -= self.object_clearance
             rhs = min(-phi - tol, 0.02)
-            constraints += [Ja_n @ dqa >= rhs]
+            if self.object_slack_weight > 0 and on_object:
+                sl = cp.Variable(nonneg=True)
+                obj_slacks.append(sl)
+                constraints += [Ja_n @ dqa >= rhs - sl]
+            else:
+                constraints += [Ja_n @ dqa >= rhs]
             # cushion: a body lying on the ground otherwise rides the hard boundary while the targets
             # pull it into the floor, and rocks as the active contact set switches
             if self.ground_margin > 0:
@@ -1087,6 +1098,8 @@ class InteractionMeshRetargeter:
 
         if sc_slacks:
             _add_term("self_collision_slack", 500.0 * cp.sum(cp.hstack(sc_slacks)))
+        if obj_slacks:
+            _add_term("object_slack", self.object_slack_weight * cp.sum(cp.hstack(obj_slacks)))
         if sc_soft:
             _add_term("self_collision_margin", self.self_collision_margin_weight * cp.sum(cp.hstack(sc_soft)))
         if ground_soft:

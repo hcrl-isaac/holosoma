@@ -887,6 +887,8 @@ def main(cfg: RetargetingConfig) -> None:
     retargeter.self_collision_escape = terms.self_collision_escape
     retargeter.self_collision_margin = terms.self_collision_margin
     retargeter.self_collision_margin_weight = terms.self_collision_margin_weight
+    retargeter.object_slack_weight = terms.object_slack_weight
+    retargeter.object_clearance = terms.object_clearance
     retargeter.foot_stack_clearance = terms.foot_stack_clearance
     retargeter.foot_stack_weight = terms.foot_stack_weight
     retargeter.ground_margin = terms.ground_margin

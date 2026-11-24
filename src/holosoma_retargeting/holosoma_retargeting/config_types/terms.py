@@ -31,6 +31,11 @@ class SolverTerms:
     """Shrink the object with the human too, so the robot reproduces a uniformly scaled scene (implies full scale)."""
     object_box_collision: bool = False
     """Collide with the object as the box bounding its mesh: mesh-mesh distances miss deep overlap, so hands sink in."""
+    object_clearance: float = 0.0
+    """Gap the robot keeps from the object, m (the non-penetration tolerance otherwise lets it sink in slightly)."""
+    object_slack_weight: float = 0.0
+    """Exact-penalty weight on robot-object non-penetration slack (0 = hard): a box held between chest and arms can make
+    the hard constraints infeasible."""
 
     # --- tracking terms ---
     laplacian_weight: float | None = None
