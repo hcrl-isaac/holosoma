@@ -29,6 +29,9 @@ class SolverTerms:
     """Scale the object's whole position with the human; off keeps its absolute height (object tasks)."""
     object_scale_with_human: bool = False
     """Shrink the object with the human too, so the robot reproduces a uniformly scaled scene (implies full scale)."""
+    object_z_offset: float = 0.0
+    """Height added to the source object track before the solve, m in the source's units (InterMimic's boxes rest
+    ~7.4 cm below its floor; correcting after the solve moves the box into the robot)."""
     object_box_collision: bool = False
     """Collide with the object as the box bounding its mesh: mesh-mesh distances miss deep overlap, so hands sink in."""
     object_clearance: float = 0.0

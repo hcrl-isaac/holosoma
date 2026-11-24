@@ -773,6 +773,9 @@ def main(cfg: RetargetingConfig) -> None:
     human_joints, object_poses, smpl_scale = load_motion_data(
         task_type, data_format, data_path, task_name, constants, cfg.motion_data_config
     )
+    if cfg.terms.object_z_offset and object_poses is not None:
+        object_poses = np.asarray(object_poses, dtype=np.float64).copy()
+        object_poses[:, 6] += cfg.terms.object_z_offset
     # preprocessing moves the object into the solve frame; the held span reads its height above the source floor
     source_object_z = np.asarray(object_poses)[:, 6].copy()
 
