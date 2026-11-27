@@ -151,6 +151,11 @@ class InteractionMeshRetargeter:
         self.box_grip_keys: tuple[str, ...] = ("L_Wrist", "R_Wrist")
         self.box_grip_mode = "touched"
         self.box_grip_penetration = 0.0
+        self.hug_arm_weight = 0.0  # > 0: hold the arms' hug closure while the box is held
+        self.hug_center_weight = 0.0  # pull of the palms' midpoint onto the box center while hugging
+        self.hug_gain: np.ndarray | None = None  # (T,) in [0, 1]: the hug terms' weight, eased around the held span
+        self.hug_roll = (0.252, 1.43, 0.296, 1.36)  # box height m, shoulder roll rad, at two heights
+        self.hug_elbow = (0.16, 0.98)  # elbow pitch and elbow yaw magnitude of the hug, rad
         self.object_slack_weight = 0.0  # 0 = hard robot-object non-penetration
         self.object_clearance = 0.0
         self._hand_object_bodies: tuple[frozenset[int], int] | None = None
@@ -1349,6 +1354,33 @@ class InteractionMeshRetargeter:
             for hand, (axis, sign) in faces.items():
                 along = sign * (J_OC_dict[hand][axis] @ dqa + p_OC_dict[hand][axis] - center[axis])
                 _add_term("box_grip", self.box_grip_weight * cp.square(along - (half[axis] - self.box_grip_depth)))
+            # Hug: a robot without wrists holds a box by a fixed closure of the shoulder roll and the elbows, loaded
+            # in every joint. With the closure held, the palms reach the faces only by the trunk, legs and shoulder
+            # pitch moving, so the robot bends to the box rather than stretching its arms to it.
+            hug_gain = 0.0
+            if self.hug_arm_weight > 0 and len(keys) == 2 and self.hug_gain is not None:
+                hug_gain = float(self.hug_gain[min(frame_idx, len(self.hug_gain) - 1)])
+            if hug_gain > 0.01:
+                roll = float(np.interp(2.0 * half[2], self.hug_roll[::2], self.hug_roll[1::2]))
+                targets = {
+                    "Left_Shoulder_Roll": -roll,
+                    "Right_Shoulder_Roll": roll,
+                    "Left_Elbow_Pitch": self.hug_elbow[0],
+                    "Right_Elbow_Pitch": self.hug_elbow[0],
+                    "Left_Elbow_Yaw": -self.hug_elbow[1],
+                    "Right_Elbow_Yaw": self.hug_elbow[1],
+                }
+                hug_terms = []
+                for jname, value in targets.items():
+                    rows = self._resolve_joint_rows((jname,))
+                    if len(rows):
+                        hug_terms.append(cp.square(dqa[rows[0]] + q_a_n_last[rows[0]] - value))
+                if hug_terms:
+                    _add_term("hug_arms", hug_gain * self.hug_arm_weight * cp.sum(cp.hstack(hug_terms)))
+                # the closed arms keep the palms a box width apart wherever they are: center them on the box
+                left, right = keys
+                middle = 0.5 * ((J_OC_dict[left] + J_OC_dict[right]) @ dqa + p_OC_dict[left] + p_OC_dict[right])
+                _add_term("hug_center", hug_gain * self.hug_center_weight * cp.sum_squares(middle - center))
 
         # Pelvis prior: the Laplacian objective leaves the absolute root pose in its null space, so the solver
         # could lean the pelvis back and cancel it with waist pitch. Anchoring the pelvis removes that freedom.

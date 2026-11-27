@@ -1238,6 +1238,8 @@ def main(cfg: RetargetingConfig) -> None:
         retargeter.box_grip_keys = tuple(k.strip() for k in terms.box_grip_keys.split(",") if k.strip())
         retargeter.box_grip_mode = terms.box_grip_mode
         retargeter.box_grip_penetration = terms.box_grip_penetration
+        retargeter.hug_arm_weight = terms.hug_arm_weight
+        retargeter.hug_center_weight = terms.hug_center_weight
         if terms.box_grip_lift > 0:
             rise = source_object_z - source_object_z.min()
             held = rise > terms.box_grip_lift
@@ -1246,6 +1248,11 @@ def main(cfg: RetargetingConfig) -> None:
                 [held[max(0, t - pad) : t + pad + 1].any() for t in range(len(held))], dtype=bool
             )
             logger.info("Box grip held span: %d of %d frames", int(retargeter.box_grip_held.sum()), len(held))
+            if terms.hug_arm_weight > 0:
+                # the hug comes on and goes off over half a second, so the body eases into and out of the bend
+                window = np.hanning(2 * 15 + 3)[1:-1]
+                gain = np.convolve(retargeter.box_grip_held.astype(float), window / window.sum(), mode="same")
+                retargeter.hug_gain = np.clip(gain, 0.0, 1.0)
         logger.info(
             "Box grip (%s): weight %.0f, palms %.3f m inside the face within %.3f m of contact, keys %s",
             retargeter.box_grip_mode,

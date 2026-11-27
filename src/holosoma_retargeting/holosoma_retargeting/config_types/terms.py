@@ -137,6 +137,12 @@ class SolverTerms:
     exerts no squeeze."""
     box_grip_pad: int = 10
     """Frames the held span is widened by on each side, so the grasp forms before the lift and outlasts the set-down."""
+    hug_arm_weight: float = 0.0
+    """While the box grip is active, hold the shoulder roll and the elbows at the hug's closure (0 = off): a robot
+    without wrists then reaches the box by bending, not by stretching its arms."""
+    hug_center_weight: float = 300.0
+    """With the hug, pull of the palms' midpoint onto the box center: soft, so the body leans to the box without
+    following every motion the source's arms gave it (the box is then placed between the palms)."""
     box_grip_mode: Literal["touched", "sides"] = "touched"
     """Hold each palm on the face its source hand touches, or, while both hands touch, both palms on opposite side faces
     (the squeeze a fingerless hand needs)."""
