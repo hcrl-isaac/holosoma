@@ -1249,8 +1249,8 @@ def main(cfg: RetargetingConfig) -> None:
             )
             logger.info("Box grip held span: %d of %d frames", int(retargeter.box_grip_held.sum()), len(held))
             if terms.hug_arm_weight > 0:
-                # the hug comes on and goes off over half a second, so the body eases into and out of the bend
-                window = np.hanning(2 * 15 + 3)[1:-1]
+                # the hug comes on and goes off over ``hug_ease`` frames each side, so the arms close within their speed
+                window = np.hanning(2 * int(terms.hug_ease) + 3)[1:-1]
                 gain = np.convolve(retargeter.box_grip_held.astype(float), window / window.sum(), mode="same")
                 retargeter.hug_gain = np.clip(gain, 0.0, 1.0)
         logger.info(

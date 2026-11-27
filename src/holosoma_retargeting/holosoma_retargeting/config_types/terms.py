@@ -140,6 +140,8 @@ class SolverTerms:
     hug_arm_weight: float = 0.0
     """While the box grip is active, hold the shoulder roll and the elbows at the hug's closure (0 = off): a robot
     without wrists then reaches the box by bending, not by stretching its arms."""
+    hug_ease: int = 15
+    """With the hug, frames on each side of the held span over which its terms come on and go off."""
     hug_center_weight: float = 300.0
     """With the hug, pull of the palms' midpoint onto the box center: soft, so the body leans to the box without
     following every motion the source's arms gave it (the box is then placed between the palms)."""
